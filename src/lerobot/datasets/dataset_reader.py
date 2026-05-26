@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import datasets
+import numpy as np
 import torch
 
 from .dataset_metadata import LeRobotDatasetMetadata
@@ -30,6 +31,7 @@ from .feature_utils import (
 )
 from .io_utils import (
     hf_transform_to_torch,
+    hf_transform_to_torch_uint8,
     load_nested_dataset,
 )
 from .video_utils import decode_video_frames
@@ -78,6 +80,7 @@ class DatasetReader:
         self._return_uint8 = return_uint8
 
         self.hf_dataset: datasets.Dataset | None = None
+        self.hf_dataset_unformatted: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
 
         # Setup delta_indices (doesn't depend on hf_dataset)
@@ -127,7 +130,8 @@ class DatasetReader:
         """hf_dataset contains all the observations, states, actions, rewards, etc."""
         features = get_hf_features_from_features(self._meta.features)
         hf_dataset = load_nested_dataset(self.root / "data", features=features, episodes=self.episodes)
-        hf_dataset.set_transform(hf_transform_to_torch)
+        self.hf_dataset_unformatted = hf_dataset.with_format(None)
+        hf_dataset.set_transform(hf_transform_to_torch_uint8 if self._return_uint8 else hf_transform_to_torch)
         return hf_dataset
 
     def _check_cached_episodes_sufficient(self) -> bool:
@@ -224,6 +228,11 @@ class DatasetReader:
                 if self._absolute_to_relative_idx is None
                 else [self._absolute_to_relative_idx[idx] for idx in q_idx]
             )
+            if key not in self._meta.camera_keys and self.hf_dataset_unformatted is not None:
+                result[key] = torch.from_numpy(
+                    np.asarray(self.hf_dataset_unformatted[key][relative_indices], dtype=np.float32)
+                )
+                continue
             try:
                 result[key] = torch.stack(self.hf_dataset[key][relative_indices])
             except (KeyError, TypeError, IndexError):

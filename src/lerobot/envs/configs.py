@@ -573,6 +573,76 @@ class RoboCasaEnv(EnvConfig):
         )
 
 
+@EnvConfig.register_subclass("robosuite")
+@dataclass
+class RobosuiteEnv(EnvConfig):
+    task: str = "Lift"
+    fps: int = 10
+    episode_length: int = 400
+    obs_type: str = "pixels_agent_pos"
+    render_mode: str = "rgb_array"
+    camera_name: str = "agentview,robot0_eye_in_hand"
+    observation_height: int = 256
+    observation_width: int = 256
+    robot: str = "Panda"
+    control_freq: int = 10
+    reward_shaping: bool = False
+    state_dim: int = 8
+    action_dim: int = 7
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(7,)),
+        }
+    )
+    features_map: dict[str, str] = field(default_factory=lambda: {ACTION: ACTION})
+
+    def __post_init__(self):
+        cams = [c.strip() for c in self.camera_name.split(",") if c.strip()]
+        if not cams:
+            raise ValueError("RobosuiteEnv requires at least one camera.")
+        self.features[ACTION] = PolicyFeature(type=FeatureType.ACTION, shape=(self.action_dim,))
+
+        for cam in cams:
+            self.features[f"pixels/{cam}"] = PolicyFeature(
+                type=FeatureType.VISUAL,
+                shape=(self.observation_height, self.observation_width, 3),
+            )
+            self.features_map[f"pixels/{cam}"] = f"{OBS_IMAGES}.{cam}"
+
+        if self.obs_type == "pixels_agent_pos":
+            self.features["agent_pos"] = PolicyFeature(type=FeatureType.STATE, shape=(self.state_dim,))
+            self.features_map["agent_pos"] = OBS_STATE
+        elif self.obs_type != "pixels":
+            raise ValueError(f"Unsupported obs_type '{self.obs_type}'. Use 'pixels' or 'pixels_agent_pos'.")
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "robot": self.robot,
+            "obs_type": self.obs_type,
+            "render_mode": self.render_mode,
+            "observation_height": self.observation_height,
+            "observation_width": self.observation_width,
+            "control_freq": self.control_freq,
+            "reward_shaping": self.reward_shaping,
+            "state_dim": self.state_dim,
+            "action_dim": self.action_dim,
+        }
+
+    def create_envs(self, n_envs: int, use_async_envs: bool = False):
+        from .robosuite import create_robosuite_envs
+
+        env_cls = _make_vec_env_cls(use_async_envs, n_envs)
+        return create_robosuite_envs(
+            task=self.task,
+            n_envs=n_envs,
+            camera_name=self.camera_name,
+            gym_kwargs=self.gym_kwargs,
+            env_cls=env_cls,
+            episode_length=self.episode_length,
+        )
+
+
 @EnvConfig.register_subclass("vlabench")
 @dataclass
 class VLABenchEnv(EnvConfig):

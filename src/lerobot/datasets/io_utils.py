@@ -276,6 +276,26 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
     return items_dict
 
 
+def hf_transform_to_torch_uint8(items_dict: dict[str, list[Any]]) -> dict[str, list[torch.Tensor | str]]:
+    """Convert a Hugging Face batch to tensors while preserving PIL images as uint8.
+
+    ``hf_transform_to_torch`` uses ``transforms.ToTensor()``, which converts PIL images
+    to float32 in [0, 1]. That is convenient, but expensive for DataLoader IPC when
+    image observations are stored as parquet Image features. This variant mirrors the
+    non-image conversion while converting PIL images to channel-first uint8 tensors.
+    """
+    for key in items_dict:
+        first_item = items_dict[key][0]
+        if isinstance(first_item, PILImage.Image):
+            pil_to_tensor = transforms.PILToTensor()
+            items_dict[key] = [pil_to_tensor(img.convert("RGB")) for img in items_dict[key]]
+        elif first_item is None:
+            pass
+        else:
+            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
+    return items_dict
+
+
 def to_parquet_with_hf_images(
     df: pandas.DataFrame, path: Path, features: datasets.Features | None = None
 ) -> None:

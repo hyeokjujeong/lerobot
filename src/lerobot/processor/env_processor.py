@@ -55,8 +55,12 @@ class LiberoProcessorStep(ObservationProcessorStep):
             if key.startswith(f"{OBS_IMAGES}."):
                 img = processed_obs[key]
 
-                # Flip both H and W
-                img = torch.flip(img, dims=[2, 3])
+                # Match the converted `yzembodied/libero_10_image_task_0`
+                # training dataset orientation. The previous H/W flip made
+                # policy inputs horizontally mirrored relative to the dataset;
+                # empirical frame checks showed that only the height axis needs
+                # flipping for this LIBERO setup.
+                img = torch.flip(img, dims=[2])
 
                 processed_obs[key] = img
         # Process robot_state into a flat state vector

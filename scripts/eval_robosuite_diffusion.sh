@@ -10,7 +10,7 @@ if ! command -v python >/dev/null 2>&1; then
 fi
 
 python -m lerobot.scripts.lerobot_eval \
-  --policy.path="/PublicHDD2/jhri626/outputs/diffusion_robosuite_lift/checkpoints/030000/pretrained_model" \
+  --policy.path="/PublicSSD/jhri626/outputs/diffusion_robosuite_lift/checkpoints/030000/pretrained_model" \
   --policy.device=cuda \
   --env.type=robosuite \
   --env.task=Lift \
@@ -25,4 +25,4 @@ python -m lerobot.scripts.lerobot_eval \
   --eval.batch_size=10 \
   --eval.n_episodes=10 \
   --eval.use_async_envs=false \
-  --output_dir="/PublicHDD2/jhri626/eval/diffusion_robosuite_lift_030000"
+  --output_dir="/PublicSSD/jhri626/eval/diffusion_robosuite_lift_030000"

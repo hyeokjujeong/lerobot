@@ -390,6 +390,27 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # create dataloader for offline training
     if hasattr(active_cfg, "drop_n_last_frames"):
         shuffle = False
+        # NOTE: Uncomment this block if training on non-contiguous dataset.episodes
+        # (for example random episode subsets). LeRobotDataset filters the HF table
+        # down to the selected episodes, so DataLoader indices must be relative to
+        # that filtered table. The meta episode bounds remain absolute indices in
+        # the original dataset.
+        #
+        # dataset_from_indices = dataset.meta.episodes["dataset_from_index"]
+        # dataset_to_indices = dataset.meta.episodes["dataset_to_index"]
+        # episode_indices_to_use = dataset.episodes
+        #
+        # if dataset.episodes is not None:
+        #     absolute_to_relative_idx = dataset.reader._absolute_to_relative_idx
+        #     dataset_from_indices = []
+        #     dataset_to_indices = []
+        #     for ep_idx in dataset.episodes:
+        #         abs_start = dataset.meta.episodes["dataset_from_index"][ep_idx]
+        #         abs_end = dataset.meta.episodes["dataset_to_index"][ep_idx]
+        #         dataset_from_indices.append(absolute_to_relative_idx[abs_start])
+        #         dataset_to_indices.append(absolute_to_relative_idx[abs_end - 1] + 1)
+        #     episode_indices_to_use = None
+
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
             dataset.meta.episodes["dataset_to_index"],

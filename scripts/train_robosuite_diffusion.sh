@@ -11,16 +11,16 @@ if ! command -v lerobot-train >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f "/PublicHDD2/jhri626/datasets/robomimic_lift_lerobot/meta/info.json" ]]; then
+if [[ ! -f "/PublicSSD/jhri626/datasets/robomimic_lift_lerobot/meta/info.json" ]]; then
   python \
     "${SCRIPT_DIR}/prepare_robomimic_lift_dataset.py" \
     --repo-id "yananchen/robomimic_lift" \
-    --output-root "/PublicHDD2/jhri626/datasets/robomimic_lift_lerobot"
+    --output-root "/PublicSSD/jhri626/datasets/robomimic_lift_lerobot"
 fi
 
 lerobot-train \
-  --dataset.repo_id="yananchen/robomimic_lift" \
-  --dataset.root="/PublicHDD2/jhri626/datasets/robomimic_lift_lerobot" \
+  --dataset.repo_id="yzembodied/libero_10_image_task_0" \
+  --dataset.root="/PublicSSD/jhri626/datasets/robomimic_lift_lerobot" \
   --dataset.video_backend=torchcodec \
   --dataset.return_uint8=true \
   --policy.type=diffusion \
@@ -49,9 +49,9 @@ lerobot-train \
   --num_workers=8 \
   --steps=30000 \
   --save_freq=10000 \
-  --eval_freq=5000 \
+  --eval_freq=0 \
   --eval.n_episodes=10 \
-  --eval.batch_size=10 \
+  --eval.batch_size=1 \
   --eval.use_async_envs=false \
   --env.type=robosuite \
   --env.task=Lift \
@@ -63,7 +63,7 @@ lerobot-train \
   --env.state_dim=8 \
   --env.action_dim=7 \
   --env.control_freq=10 \
-  --output_dir="/PublicHDD2/jhri626/outputs/diffusion_robosuite_lift" \
+  --output_dir="/PublicSSD/jhri626/outputs/diffusion_robosuite_lift" \
   --job_name=diffusion_robosuite_lift \
   --wandb.enable=true \
   --wandb.log_eval_video=false

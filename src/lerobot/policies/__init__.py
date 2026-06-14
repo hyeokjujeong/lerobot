@@ -15,6 +15,10 @@
 from lerobot.utils.action_interpolator import ActionInterpolator as ActionInterpolator
 
 from .act.configuration_act import ACTConfig as ACTConfig
+
+# AFT (Adaptive Feature Transfer) diffusion variant. Additive extension; importing it here
+# registers the "aft_diffusion" choice with draccus so `--policy.type=aft_diffusion` resolves.
+from .aft_diffusion.configuration_aft_diffusion import AFTDiffusionConfig as AFTDiffusionConfig
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .eo1.configuration_eo1 import EO1Config as EO1Config
 from .factory import get_policy_class, make_policy, make_policy_config, make_pre_post_processors
@@ -39,6 +43,7 @@ from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
 __all__ = [
     # Configuration classes
     "ACTConfig",
+    "AFTDiffusionConfig",
     "DiffusionConfig",
     "EO1Config",
     "GaussianActorConfig",

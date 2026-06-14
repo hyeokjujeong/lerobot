@@ -160,6 +160,101 @@ def update_policy(
     return train_metrics, output_dict
 
 
+def _maybe_build_val_loader(cfg: TrainPipelineConfig, train_dataset, device):
+    """Optionally build a held-out validation DataLoader (additive, opt-in via env vars).
+
+    Enabled by exporting LEROBOT_VAL_EPISODES with a comma-separated list of episode
+    indices held out from training (e.g. "15,16,17,18,19"). Tweak cadence/size with
+    LEROBOT_VAL_FREQ (default 1000) and LEROBOT_VAL_BATCHES (default 16). Returns
+    ``(loader, freq, num_batches)`` or ``(None, 0, 0)`` when disabled — a complete
+    no-op for existing training runs that don't set the env var.
+
+    The validation loss is the policy's full training loss on unseen episodes; for a
+    Diffusion Policy that is the behavioral-cloning (denoising) loss. For
+    aft_diffusion, held-out episodes typically have no PI0 features, so the AFT term
+    is skipped and the value is the pure BC loss — exactly what we want to watch the
+    generalization gap.
+    """
+    import os
+
+    raw = os.environ.get("LEROBOT_VAL_EPISODES", "").strip()
+    if not raw:
+        return None, 0, 0
+    try:
+        val_eps = sorted({int(x) for x in raw.replace(" ", "").split(",") if x != ""})
+    except ValueError:
+        logging.warning("LEROBOT_VAL_EPISODES=%r is not a valid int list; validation disabled.", raw)
+        return None, 0, 0
+    if not val_eps:
+        return None, 0, 0
+
+    val_freq = int(os.environ.get("LEROBOT_VAL_FREQ", "1000"))
+    val_batches = int(os.environ.get("LEROBOT_VAL_BATCHES", "16"))
+
+    train_eps = set(cfg.dataset.episodes) if cfg.dataset.episodes else None
+    if train_eps is not None and (set(val_eps) & train_eps):
+        logging.warning(
+            "Validation episodes overlap training episodes %s; the val loss will NOT be a clean held-out signal.",
+            sorted(set(val_eps) & train_eps),
+        )
+
+    from lerobot.datasets.factory import IMAGENET_STATS, resolve_delta_timestamps
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    delta_timestamps = resolve_delta_timestamps(cfg.trainable_config, train_dataset.meta)
+    val_ds = LeRobotDataset(
+        cfg.dataset.repo_id,
+        root=cfg.dataset.root,
+        episodes=val_eps,
+        delta_timestamps=delta_timestamps,
+        image_transforms=None,  # no augmentation for evaluation
+        revision=cfg.dataset.revision,
+        video_backend=cfg.dataset.video_backend,
+        return_uint8=True,
+        tolerance_s=cfg.tolerance_s,
+    )
+    if cfg.dataset.use_imagenet_stats:
+        for key in val_ds.meta.camera_keys:
+            for stats_type, stats in IMAGENET_STATS.items():
+                val_ds.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
+
+    val_loader = torch.utils.data.DataLoader(
+        val_ds,
+        num_workers=0,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        pin_memory=device.type == "cuda",
+        drop_last=True,
+    )
+    logging.info(
+        "Validation loss ENABLED: episodes=%s freq=%d batches=%d val_frames=%d",
+        val_eps,
+        val_freq,
+        val_batches,
+        val_ds.num_frames,
+    )
+    return val_loader, val_freq, val_batches
+
+
+@torch.no_grad()
+def _run_validation(policy, val_iter, val_batches, preprocessor, camera_keys):
+    """Average the policy loss over a few held-out batches. Returns (val_loss, n)."""
+    was_training = policy.training
+    policy.eval()
+    losses = []
+    for _ in range(val_batches):
+        vb = next(val_iter)
+        for cam_key in camera_keys:
+            if cam_key in vb and vb[cam_key].dtype == torch.uint8:
+                vb[cam_key] = vb[cam_key].to(dtype=torch.float32) / 255.0
+        vb = preprocessor(vb)
+        vloss, _ = policy.forward(vb)
+        losses.append(vloss.item())
+    if was_training:
+        policy.train()
+    return (sum(losses) / max(1, len(losses))), len(losses)
+
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     """
@@ -443,6 +538,12 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
     policy.train()
 
+    # Optional held-out validation loss (opt-in via LEROBOT_VAL_EPISODES env var).
+    val_loader, val_freq, val_batches = (None, 0, 0)
+    if is_main_process:
+        val_loader, val_freq, val_batches = _maybe_build_val_loader(cfg, dataset, device)
+    val_iter = cycle(val_loader) if val_loader is not None else None
+
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
@@ -505,8 +606,29 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
+        # Optional held-out validation loss (generalization signal). Opt-in; no-op
+        # unless LEROBOT_VAL_EPISODES is set. Runs on the main process only.
+        if val_loader is not None and val_freq > 0 and step % val_freq == 0 and is_main_process:
+            val_loss, n_val = _run_validation(
+                policy, val_iter, val_batches, preprocessor, dataset.meta.camera_keys
+            )
+            logging.info(f"[VAL] step:{step} val_loss(BC):{val_loss:.4f} (avg over {n_val} batches)")
+            if wandb_logger:
+                wandb_logger.log_dict({"val/loss": val_loss}, step)
+
         if is_log_step:
             logging.info(train_tracker)
+            # AFT (aft_diffusion): surface the vision feature-transfer metrics on the
+            # console too. They are already forwarded to wandb via the output_dict
+            # merge below; this block only adds a human-readable console line and is a
+            # no-op for policies that don't emit `aft_*` keys.
+            if output_dict and any(str(k).startswith("aft_") for k in output_dict):
+                aft_str = " ".join(
+                    f"{k}:{v:.4f}" if isinstance(v, float) else f"{k}:{v}"
+                    for k, v in output_dict.items()
+                    if str(k).startswith("aft_")
+                )
+                logging.info(f"[AFT] {aft_str}")
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:

@@ -124,6 +124,9 @@ class RobosuiteEnv(gym.Env):
             dtype=np.float32,
         )
 
+    def _register_task(self) -> None:
+        """Hook for wrappers that register additional robosuite tasks."""
+
     def _ensure_env(self) -> None:
         if self._env is not None:
             return
@@ -135,6 +138,8 @@ class RobosuiteEnv(gym.Env):
 
         import robosuite as suite
         from robosuite.controllers import load_controller_config
+
+        self._register_task()
 
         controller_config = load_controller_config(default_controller="OSC_POSE")
         self._env = suite.make(

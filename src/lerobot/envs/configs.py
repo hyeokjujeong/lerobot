@@ -643,6 +643,25 @@ class RobosuiteEnv(EnvConfig):
         )
 
 
+@EnvConfig.register_subclass("mimicgen")
+@dataclass
+class MimicGenEnv(RobosuiteEnv):
+    task: str = "Coffee_D2"
+
+    def create_envs(self, n_envs: int, use_async_envs: bool = False):
+        from .mimicgen import create_mimicgen_envs
+
+        env_cls = _make_vec_env_cls(use_async_envs, n_envs)
+        return create_mimicgen_envs(
+            task=self.task,
+            n_envs=n_envs,
+            camera_name=self.camera_name,
+            gym_kwargs=self.gym_kwargs,
+            env_cls=env_cls,
+            episode_length=self.episode_length,
+        )
+
+
 @EnvConfig.register_subclass("vlabench")
 @dataclass
 class VLABenchEnv(EnvConfig):

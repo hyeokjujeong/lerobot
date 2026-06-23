@@ -28,12 +28,12 @@ export LEROBOT_VAL_EPISODES="${LEROBOT_VAL_EPISODES:-100,101,102,103,104,105,106
 export LEROBOT_VAL_FREQ="${LEROBOT_VAL_FREQ:-1000}"
 export LEROBOT_VAL_BATCHES="${LEROBOT_VAL_BATCHES:-32}"
 
-AFT_FEATURE_DIR="${AFT_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/pi0_features}"
-AFT_BETA="${AFT_BETA:-1.0}"
+AFT_FEATURE_DIR="${AFT_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/pi0_features_float}"
+AFT_BETA="${AFT_BETA:-0.3}"
 AFT_ENABLE="${AFT_ENABLE:-true}"
-INIT_POLICY_PATH="${INIT_POLICY_PATH:-/PublicSSD/jhri626/outputs/diffusion_mimicgen_coffee_d2_ep100_images_no_crop/checkpoints/120000/pretrained_model}"
+INIT_POLICY_PATH="${INIT_POLICY_PATH:-}"
 
-RUN_NAME="${RUN_NAME:-aft_diffusion_mimicgen_coffee_d2_ep100_images_no_crop_aft-finetune_120000}"
+RUN_NAME="${RUN_NAME:-aft_diffusion_mimicgen_coffee_d2_ep100_images_no_crop_aft-finetune_float}"
 OUTPUT_DIR="${OUTPUT_DIR:-/PublicSSD/jhri626/outputs/${RUN_NAME}}"
 WARM_START_POLICY_DIR="${WARM_START_POLICY_DIR:-/PublicSSD/jhri626/outputs/aft_warm_start_policies/${RUN_NAME}}"
 BATCH_SIZE="${BATCH_SIZE:-64}"

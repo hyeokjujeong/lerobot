@@ -26,4 +26,4 @@ python "${SCRIPT_DIR}/infer_pi0_features.py" \
   --image-key-map "observation.images.agentview=observation.images.base_0_rgb,observation.images.robot0_eye_in_hand=observation.images.left_wrist_0_rgb" \
   --shard-by "episode" \
   --output-format "safetensors" \
-  --output-path "/PublicSSD/ft_vla/outputs/pi0_features/mimicgen_coffee_d2_ep0_99_images_pi0_base_features_full_float32.safetensors"
+  --output-path "/PublicSSD/ft_vla/outputs/pi0_features_float/mimicgen_coffee_d2_ep0_99_images_pi0_base_features_full_float32.safetensors"

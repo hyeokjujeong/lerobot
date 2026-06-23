@@ -344,7 +344,6 @@ def main() -> None:
         episodes=args.episodes,
         delta_timestamps=delta_timestamps,
         video_backend=args.video_backend,
-        return_uint8=True,
     )
 
     policy_cls = get_policy_class(cfg.type)

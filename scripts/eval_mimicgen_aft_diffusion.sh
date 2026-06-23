@@ -22,7 +22,7 @@ if ! command -v python >/dev/null 2>&1; then
 fi
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-RUN_NAME="${RUN_NAME:-aft_diffusion_mimicgen_coffee_d2_ep100_images_no_crop}"
+RUN_NAME="${RUN_NAME:-aft_diffusion_mimicgen_coffee_d2_ep100_images_no_crop_aft-finetune_float}"
 OUTPUTS_ROOT="${OUTPUTS_ROOT:-/PublicSSD/jhri626/outputs}"
 EVAL_ROOT="${EVAL_ROOT:-/PublicSSD/jhri626/eval}"
 CKPT=""
@@ -37,9 +37,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-CKPT="${CKPT:-${OUTPUTS_ROOT}/${RUN_NAME}/checkpoints/last/pretrained_model}"
+CKPT="${CKPT:-${OUTPUTS_ROOT}/${RUN_NAME}/checkpoints/120000/pretrained_model}"
 N_EPISODES="${N_EPISODES:-50}"
-OUTPUT_DIR="${OUTPUT_DIR:-${EVAL_ROOT}/${RUN_NAME}}"
+OUTPUT_DIR="${OUTPUT_DIR:-${EVAL_ROOT}/aft_float/${RUN_NAME}_120000}"
 
 if [[ ! -d "${CKPT}" ]]; then
   echo "ERROR: checkpoint not found: ${CKPT}" >&2
@@ -64,7 +64,7 @@ python -m lerobot.scripts.lerobot_eval \
   --env.state_dim=8 \
   --env.action_dim=7 \
   --env.control_freq=20 \
-  --eval.batch_size=1 \
+  --eval.batch_size=50 \
   --eval.n_episodes="${N_EPISODES}" \
   --eval.use_async_envs=false \
   --output_dir="${OUTPUT_DIR}" \

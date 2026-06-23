@@ -599,6 +599,7 @@ class TaskMetrics(TypedDict):
     sum_rewards: list[float]
     max_rewards: list[float]
     successes: list[bool]
+    seeds: list[int | None]
     video_paths: list[str]
 
 
@@ -642,6 +643,7 @@ def eval_one(
         sum_rewards=[ep["sum_reward"] for ep in per_episode],
         max_rewards=[ep["max_reward"] for ep in per_episode],
         successes=[ep["success"] for ep in per_episode],
+        seeds=[ep["seed"] for ep in per_episode],
         video_paths=task_result.get("video_paths", []),
     )
 

@@ -23,7 +23,7 @@ python -m lerobot.scripts.lerobot_eval \
   --env.state_dim=8 \
   --env.action_dim=7 \
   --env.control_freq=20 \
-  --eval.batch_size=50 \
+  --eval.batch_size=25 \
   --eval.n_episodes=50 \
   --eval.use_async_envs=false \
-  --output_dir=/PublicSSD/jhri626/eval/diffusion_mimicgen_coffee_d2_ep100_images_no_crop_120000
+  --output_dir=/PublicSSD/jhri626/eval/Dp/diffusion_mimicgen_coffee_d2_ep100_images_no_crop_120000

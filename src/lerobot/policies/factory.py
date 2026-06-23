@@ -51,6 +51,7 @@ from .gaussian_actor.configuration_gaussian_actor import GaussianActorConfig
 from .groot.configuration_groot import GrootConfig
 from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from .pi0.configuration_pi0 import PI0Config
+from .pi0_vision_diffusion.configuration_pi0_vision_diffusion import PI0VisionDiffusionConfig
 from .pi05.configuration_pi05 import PI05Config
 from .pretrained import PreTrainedPolicy
 from .smolvla.configuration_smolvla import SmolVLAConfig
@@ -119,6 +120,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .pi0.modeling_pi0 import PI0Policy
 
         return PI0Policy
+    elif name == "pi0_vision_diffusion":
+        from .pi0_vision_diffusion.modeling_pi0_vision_diffusion import PI0VisionDiffusionPolicy
+
+        return PI0VisionDiffusionPolicy
     elif name == "pi0_fast":
         from .pi0_fast.modeling_pi0_fast import PI0FastPolicy
 
@@ -189,6 +194,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
         return PI0Config(**kwargs)
+    elif policy_type == "pi0_vision_diffusion":
+        return PI0VisionDiffusionConfig(**kwargs)
     elif policy_type == "pi05":
         return PI05Config(**kwargs)
     elif policy_type == "gaussian_actor":

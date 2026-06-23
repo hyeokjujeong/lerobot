@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import math
+import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -179,6 +180,18 @@ class RobosuiteEnv(gym.Env):
 
         return {"pixels": images, "agent_pos": agent_pos}
 
+    def _seed_inner_env(self, seed: int | None) -> None:
+        if seed is None:
+            return
+
+        seed = int(seed)
+        seed_fn = getattr(self._env, "seed", None)
+        if callable(seed_fn):
+            try:
+                seed_fn(seed)
+            except TypeError:
+                seed_fn(seed=seed)
+
     def render(self) -> np.ndarray:
         self._ensure_env()
         assert self._env is not None
@@ -194,7 +207,19 @@ class RobosuiteEnv(gym.Env):
         assert self._env is not None
         super().reset(seed=seed)
         self._step_count = 0
-        raw_obs = self._env.reset()
+        self._seed_inner_env(seed)
+        if seed is None:
+            raw_obs = self._env.reset()
+        else:
+            random_state = random.getstate()
+            numpy_random_state = np.random.get_state()
+            random.seed(seed)
+            np.random.seed(seed)
+            try:
+                raw_obs = self._env.reset()
+            finally:
+                random.setstate(random_state)
+                np.random.set_state(numpy_random_state)
         return self._format_raw_obs(raw_obs), {"is_success": False}
 
     def step(self, action: np.ndarray) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:

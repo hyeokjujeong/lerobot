@@ -26,6 +26,9 @@ from .gaussian_actor.configuration_gaussian_actor import GaussianActorConfig as 
 from .groot.configuration_groot import GrootConfig as GrootConfig
 from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig as MultiTaskDiTConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
+from .pi0_vision_diffusion.configuration_pi0_vision_diffusion import (
+    PI0VisionDiffusionConfig as PI0VisionDiffusionConfig,
+)
 from .pi0_fast.configuration_pi0_fast import PI0FastConfig as PI0FastConfig
 from .pi05.configuration_pi05 import PI05Config as PI05Config
 from .pretrained import PreTrainedPolicy as PreTrainedPolicy
@@ -50,6 +53,7 @@ __all__ = [
     "GrootConfig",
     "MultiTaskDiTConfig",
     "PI0Config",
+    "PI0VisionDiffusionConfig",
     "PI0FastConfig",
     "PI05Config",
     "SmolVLAConfig",

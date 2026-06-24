@@ -75,21 +75,31 @@ if [[ -n "${VAL_EPISODES:-}" ]]; then
   echo "Validation: episodes=${LEROBOT_VAL_EPISODES} freq=${LEROBOT_VAL_FREQ} batches=${LEROBOT_VAL_BATCHES}"
 fi
 
-# --- (b) OPTIONAL in-training success-rate eval in the LIBERO sim. Set EVAL=true.
+# --- (b) OPTIONAL in-training success-rate eval in the LIBERO sim.
 #     Requires lerobot[libero]; uses MUJOCO_GL for offscreen rendering.
+#   EVAL=true          : eval on the --eval_freq schedule (default every 6000 steps).
+#   EVAL_ON_SAVE=true  : eval at EVERY checkpoint save (couples eval to --save_freq);
+#                        sets eval_freq=0 so eval fires only on saves (no double-eval).
+#   Either one turns on the sim env flags below.
 EVAL="${EVAL:-false}"
+EVAL_ON_SAVE="${EVAL_ON_SAVE:-false}"
+EVAL_N_EPISODES="${EVAL_N_EPISODES:-10}"
 EVAL_ARGS=()
-if [[ "${EVAL}" != "true" ]]; then
-  EVAL_ARGS+=(--eval_freq=0)   # default: no in-training rollout eval
-else
+if [[ "${EVAL}" == "true" || "${EVAL_ON_SAVE}" == "true" ]]; then
   export MUJOCO_GL="${MUJOCO_GL:-egl}"
-  EVAL_FREQ="${EVAL_FREQ:-6000}"
-  EVAL_N_EPISODES="${EVAL_N_EPISODES:-10}"
+  if [[ "${EVAL_ON_SAVE}" == "true" ]]; then
+    export LEROBOT_EVAL_ON_SAVE=true
+    EVAL_FREQ_ARG=0   # eval driven by checkpoint saves (save_freq), not eval_freq
+    echo "In-training eval: ON EVERY SAVE (save_freq) (MUJOCO_GL=${MUJOCO_GL} n_episodes=${EVAL_N_EPISODES})"
+  else
+    EVAL_FREQ_ARG="${EVAL_FREQ:-6000}"
+    echo "In-training eval: ENABLED every ${EVAL_FREQ_ARG} steps (MUJOCO_GL=${MUJOCO_GL} n_episodes=${EVAL_N_EPISODES})"
+  fi
   EVAL_ARGS+=(
-    --eval_freq="${EVAL_FREQ}"
+    --eval_freq="${EVAL_FREQ_ARG}"
     --eval.n_episodes="${EVAL_N_EPISODES}"
-    --eval.batch_size=1
-    --eval.use_async_envs=false
+    --eval.batch_size="${EVAL_BATCH:-1}"
+    --eval.use_async_envs="${EVAL_ASYNC:-false}"
     --env.type=libero
     --env.task=libero_10
     --env.task_ids='[0]'
@@ -99,7 +109,8 @@ else
     --env.observation_width=256
     --env.camera_name_mapping='{"agentview_image":"image","robot0_eye_in_hand_image":"wrist_image"}'
   )
-  echo "In-training eval: ENABLED (MUJOCO_GL=${MUJOCO_GL} eval_freq=${EVAL_FREQ} n_episodes=${EVAL_N_EPISODES})"
+else
+  EVAL_ARGS+=(--eval_freq=0)   # default: no in-training rollout eval
 fi
 
 # Forward WANDB_ENTITY / WANDB_PROJECT as EXPLICIT lerobot flags. lerobot calls

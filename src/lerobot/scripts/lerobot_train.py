@@ -340,8 +340,14 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
+    # Opt-in: also run sim eval at EVERY checkpoint save (in addition to / instead of
+    # the eval_freq schedule). Export LEROBOT_EVAL_ON_SAVE=true to couple eval cadence
+    # to `--save_freq`. Requires a sim env (`cfg.env`). Default off -> behavior unchanged.
+    import os
+
+    eval_on_save = os.environ.get("LEROBOT_EVAL_ON_SAVE", "").strip().lower() in ("1", "true", "yes")
     eval_env = None
-    if cfg.eval_freq > 0 and cfg.env is not None and is_main_process:
+    if (cfg.eval_freq > 0 or eval_on_save) and cfg.env is not None and is_main_process:
         logging.info("Creating env")
         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
@@ -629,6 +635,16 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     if str(k).startswith("aft_")
                 )
                 logging.info(f"[AFT] {aft_str}")
+            # Dual-BC (dual_bc_diffusion): human-readable console line for the teacher-BC
+            # metrics. Forwarded to wandb via the output_dict merge below; no-op for
+            # policies that don't emit `tbc_*` keys.
+            if output_dict and any(str(k).startswith("tbc_") for k in output_dict):
+                tbc_str = " ".join(
+                    f"{k}:{v:.4f}" if isinstance(v, float) else f"{k}:{v}"
+                    for k, v in output_dict.items()
+                    if str(k).startswith("tbc_")
+                )
+                logging.info(f"[DualBC] {tbc_str}")
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
                 if output_dict:
@@ -660,7 +676,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
             accelerator.wait_for_everyone()
 
-        if cfg.env and is_eval_step:
+        # Run sim eval on the eval_freq schedule, and (if LEROBOT_EVAL_ON_SAVE) also at
+        # every checkpoint save — so each saved checkpoint gets an eval.
+        if cfg.env and (is_eval_step or (eval_on_save and is_saving_step)):
             if is_main_process:
                 step_id = get_step_identifier(step, cfg.steps)
                 logging.info(f"Eval policy at step {step}")

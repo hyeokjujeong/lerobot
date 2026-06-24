@@ -19,6 +19,12 @@ from .act.configuration_act import ACTConfig as ACTConfig
 # AFT (Adaptive Feature Transfer) diffusion variant. Additive extension; importing it here
 # registers the "aft_diffusion" choice with draccus so `--policy.type=aft_diffusion` resolves.
 from .aft_diffusion.configuration_aft_diffusion import AFTDiffusionConfig as AFTDiffusionConfig
+
+# Dual-BC (teacher-feature behavioral-cloning auxiliary loss) diffusion variant.
+# Additive extension; importing it registers the "dual_bc_diffusion" choice with draccus.
+from .dual_bc_diffusion.configuration_dual_bc_diffusion import (
+    DualBCDiffusionConfig as DualBCDiffusionConfig,
+)
 from .diffusion.configuration_diffusion import DiffusionConfig as DiffusionConfig
 from .eo1.configuration_eo1 import EO1Config as EO1Config
 from .factory import get_policy_class, make_policy, make_policy_config, make_pre_post_processors
@@ -47,6 +53,7 @@ __all__ = [
     # Configuration classes
     "ACTConfig",
     "AFTDiffusionConfig",
+    "DualBCDiffusionConfig",
     "DiffusionConfig",
     "EO1Config",
     "GaussianActorConfig",

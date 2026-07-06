@@ -19,6 +19,7 @@ Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + wand
 """
 
 import dataclasses
+import json
 import logging
 import time
 from contextlib import nullcontext
@@ -680,6 +681,11 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         # every checkpoint save — so each saved checkpoint gets an eval.
         if cfg.env and (is_eval_step or (eval_on_save and is_saving_step)):
             if is_main_process:
+                if eval_env is None:
+                    logging.info("Creating env")
+                    eval_env = make_env(
+                        cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs
+                    )
                 step_id = get_step_identifier(step, cfg.steps)
                 logging.info(f"Eval policy at step {step}")
                 with torch.no_grad(), accelerator.autocast():
@@ -698,6 +704,13 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     )
                 # overall metrics (suite-agnostic)
                 aggregated = eval_info["overall"]
+
+                eval_dir = cfg.output_dir / "eval"
+                eval_dir.mkdir(parents=True, exist_ok=True)
+                with open(eval_dir / f"eval_info_step_{step_id}.json", "w") as f:
+                    json.dump(eval_info, f, indent=2)
+                with open(eval_dir / "eval_info.json", "w") as f:
+                    json.dump(eval_info, f, indent=2)
 
                 # optional: per-suite logging
                 for suite, suite_info in eval_info.items():
@@ -725,6 +738,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     if cfg.wandb.log_eval_video and eval_info["overall"]["video_paths"]:
                         wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                # eval_policy_all closes task envs internally; rebuild before the next scheduled eval.
+                eval_env = None
 
             accelerator.wait_for_everyone()
 

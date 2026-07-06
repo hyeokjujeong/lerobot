@@ -61,6 +61,22 @@ class AFTDiffusionConfig(DiffusionConfig):
             (single-frame) PI0 feature. ``-1`` = current step (default).
         aft_prior_lr: Learning rate for the AFT prior's adaptive scales (separate
             optimizer param group). If None, uses the model learning rate.
+        action_aft_enable: Enable the action-representation AFT regularizer.
+        action_aft_feature_dir: Directory of pre-extracted PI0 action-expert
+            feature shards. Expected key: ``features.<action_aft_layer>``.
+        action_aft_beta: Regularization strength for the action AFT term.
+        action_aft_pretrained_dim: Dimensionality of the PI0 action teacher
+            feature after ``action_aft_pool``. For layer17 mean-pooled action
+            tokens this is 1024.
+        action_aft_timestep: DP diffusion timestep used for the action AFT
+            auxiliary U-Net forward and feature lookup.
+        action_aft_layer: PI0 action feature layer name stored in the shards.
+        action_aft_pool: How to reduce PI0 action-token features. ``mean`` turns
+            ``[horizon, dim]`` into ``[dim]``.
+        action_aft_store_mode: ``lazy`` loads episode shards on demand; ``eager``
+            loads all action features into CPU RAM at policy construction.
+        action_aft_learn_scales/action_aft_kernel/action_aft_prior_lr: Same
+            kernel-prior options as the vision AFT prior, but for action features.
     """
 
     aft_enable: bool = True
@@ -75,6 +91,18 @@ class AFTDiffusionConfig(DiffusionConfig):
     aft_obs_step: int = -1
     aft_prior_lr: float | None = 1e-2
 
+    action_aft_enable: bool = False
+    action_aft_feature_dir: str | None = None
+    action_aft_beta: float = 1.0
+    action_aft_pretrained_dim: int = 1024
+    action_aft_timestep: int = 95
+    action_aft_layer: str = "pi0.layer17"
+    action_aft_pool: str = "mean"
+    action_aft_store_mode: str = "lazy"
+    action_aft_learn_scales: bool = True
+    action_aft_kernel: str = "linear"
+    action_aft_prior_lr: float | None = 1e-2
+
     def __post_init__(self):
         super().__post_init__()
         if self.aft_kernel not in ("linear", "rbf"):
@@ -85,3 +113,23 @@ class AFTDiffusionConfig(DiffusionConfig):
             raise ValueError(f"`aft_camera_reduce` must be 'concat' or 'mean'. Got {self.aft_camera_reduce}.")
         if self.aft_enable and self.aft_pretrained_dim <= 0:
             raise ValueError(f"`aft_pretrained_dim` must be a positive int. Got {self.aft_pretrained_dim}.")
+        if self.action_aft_kernel not in ("linear", "rbf"):
+            raise ValueError(
+                f"`action_aft_kernel` must be 'linear' or 'rbf'. Got {self.action_aft_kernel}."
+            )
+        if self.action_aft_pool not in ("mean", "flatten"):
+            raise ValueError(
+                f"`action_aft_pool` must be 'mean' or 'flatten'. Got {self.action_aft_pool}."
+            )
+        if self.action_aft_store_mode not in ("lazy", "eager"):
+            raise ValueError(
+                f"`action_aft_store_mode` must be 'lazy' or 'eager'. Got {self.action_aft_store_mode}."
+            )
+        if self.action_aft_enable and self.action_aft_pretrained_dim <= 0:
+            raise ValueError(
+                f"`action_aft_pretrained_dim` must be a positive int. Got {self.action_aft_pretrained_dim}."
+            )
+        if self.action_aft_enable and self.action_aft_timestep < 0:
+            raise ValueError(f"`action_aft_timestep` must be >= 0. Got {self.action_aft_timestep}.")
+        if self.action_aft_beta < 0:
+            raise ValueError(f"`action_aft_beta` must be >= 0. Got {self.action_aft_beta}.")

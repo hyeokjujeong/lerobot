@@ -24,7 +24,8 @@ if ! command -v python >/dev/null 2>&1; then
   exit 1
 fi
 
-AFT_FEATURE_DIR="${AFT_FEATURE_DIR:-$(cd "$(dirname "$0")/.." && pwd)/extracted_feature/libero10_task0_pi0base}"
+AFT_FEATURE_DIR="${AFT_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/pi0_features_float/libero}"
+ACTION_AFT_FEATURE_DIR="${ACTION_AFT_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/pi0_action_features_float/libero}"
 
 python -m lerobot.scripts.lerobot_train \
   --policy.type=aft_diffusion \
@@ -52,7 +53,7 @@ python -m lerobot.scripts.lerobot_train \
   --policy.use_film_scale_modulation=true \
   --policy.aft_enable=true \
   --policy.aft_feature_dir="${AFT_FEATURE_DIR}" \
-  --policy.aft_beta=1.0 \
+  --policy.aft_beta=0.3 \
   --policy.aft_pretrained_dim=2304 \
   --policy.aft_learn_scales=true \
   --policy.aft_kernel=linear \
@@ -61,6 +62,10 @@ python -m lerobot.scripts.lerobot_train \
   --policy.aft_camera_indices='[0,1]' \
   --policy.aft_obs_step=-1 \
   --policy.aft_prior_lr=1e-2 \
+  --policy.action_aft_enable=true \
+  --policy.action_aft_feature_dir="${ACTION_AFT_FEATURE_DIR}" \
+  --policy.action_aft_beta=0.1 \
+  --policy.action_aft_store_mode=eager \
   --use_policy_training_preset=true \
   --optimizer.type=adamw \
   --optimizer.lr=1e-4 \
@@ -84,17 +89,19 @@ python -m lerobot.scripts.lerobot_train \
   --env.observation_height=256 \
   --env.observation_width=256 \
   --env.camera_name_mapping='{"agentview_image":"image","robot0_eye_in_hand_image":"wrist_image"}' \
-  --output_dir=/PublicSSD/jhri626/outputs/libero10_task0_aft_diffusion_obs2_ep15 \
-  --job_name=libero10_task0_aft_diffusion_obs2_ep15 \
-  --steps=24000 \
-  --batch_size=32 \
-  --num_workers=16 \
+  --output_dir=/PublicSSD/jhri626/outputs/libero10_task0_vision_action_aft_t95 \
+  --job_name=libero10_task0_vision_action_aft_t95 \
+  --steps=60000 \
+  --batch_size=64 \
+  --num_workers=4 \
   --prefetch_factor=2 \
   --eval_freq=0 \
   --save_freq=6000 \
-  --log_freq=500 \
+  --log_freq=200 \
   --eval.n_episodes=50 \
-  --eval.batch_size=10 \
+  --eval.batch_size=8 \
   --eval.use_async_envs=false \
   --wandb.enable=true \
+  --wandb.project=libero_task0 \
+  --wandb.entity=vla_ft \
   --wandb.log_eval_video=false

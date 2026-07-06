@@ -313,6 +313,7 @@ class DualBCDiffusionPolicy(DiffusionPolicy):
         if config.tbc_enable and config.tbc_feature_dir:
             store = PI0VisionFeatureStore(
                 feature_dir=config.tbc_feature_dir,
+                feature_key=config.tbc_feature_key,
                 token_pool=config.tbc_token_pool,
                 camera_reduce=config.tbc_camera_reduce,
                 camera_indices=config.tbc_camera_indices,

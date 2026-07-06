@@ -71,6 +71,9 @@ class DualBCDiffusionConfig(DiffusionConfig):
             shards (``*.pt`` / ``*.safetensors``), e.g.
             ``lerobot/extracted_feature/libero10_task0_pi0base``. If empty/missing,
             the teacher-BC term is inactive (plain Diffusion Policy).
+        tbc_feature_key: Feature tensor key to read from each shard. Defaults to
+            ``features.vision_tower``. For Cosmos3 G-V-KV0 experiments, use
+            ``features.cosmos3_g_v_kv0``.
         tbc_lambda: Weight on the teacher-feature BC loss. Total loss is
             ``L_bc(student) + tbc_lambda * L_bc(teacher)``.
         tbc_pretrained_dim: Dimensionality of the *pooled* PI0 feature produced by
@@ -105,6 +108,7 @@ class DualBCDiffusionConfig(DiffusionConfig):
 
     tbc_enable: bool = True
     tbc_feature_dir: str | None = None
+    tbc_feature_key: str = "features.vision_tower"
     tbc_lambda: float = 1.0
     tbc_pretrained_dim: int = 2304
     tbc_camera_indices: tuple[int, ...] | None = (0, 1)

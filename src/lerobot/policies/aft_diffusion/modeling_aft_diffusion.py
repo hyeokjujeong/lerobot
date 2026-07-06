@@ -44,12 +44,12 @@ import einops
 import torch
 from torch import Tensor, nn
 
-from lerobot.utils.constants import OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_STATE
 
 from ..diffusion.modeling_diffusion import DiffusionModel, DiffusionPolicy
 from .aft_prior import VisionKernelPrior
 from .configuration_aft_diffusion import AFTDiffusionConfig
-from .feature_store import PI0VisionFeatureStore
+from .feature_store import PI0ActionFeatureStore, PI0VisionFeatureStore
 
 
 class AFTDiffusionModel(DiffusionModel):
@@ -69,9 +69,17 @@ class AFTDiffusionModel(DiffusionModel):
                 learn_scales=config.aft_learn_scales,
                 kernel=config.aft_kernel,
             )
+        self.action_aft_prior: VisionKernelPrior | None = None
+        if config.action_aft_enable:
+            self.action_aft_prior = VisionKernelPrior(
+                num_features=config.action_aft_pretrained_dim,
+                learn_scales=config.action_aft_learn_scales,
+                kernel=config.action_aft_kernel,
+            )
 
         # Offline PI0 feature store (plain attribute, NOT a submodule / no params).
         self._feature_store: PI0VisionFeatureStore | None = None
+        self._action_feature_store: PI0ActionFeatureStore | None = None
         # Map episode_index -> global dataset start index, used to reconstruct a
         # frame_index from the batch's global `index` when the preprocessor has
         # dropped `frame_index` (the LeRobot diffusion preprocessor keeps `index`
@@ -82,6 +90,7 @@ class AFTDiffusionModel(DiffusionModel):
 
         # Forward hooks to capture per-camera RGB-encoder outputs during the normal forward.
         self._aft_captured: list[Tensor] = []
+        self._action_aft_captured: Tensor | None = None
         if config.image_features:
             encoders = self.rgb_encoder if isinstance(self.rgb_encoder, nn.ModuleList) else [self.rgb_encoder]
             for enc in encoders:
@@ -93,6 +102,9 @@ class AFTDiffusionModel(DiffusionModel):
 
     def attach_feature_store(self, store: PI0VisionFeatureStore | None) -> None:
         self._feature_store = store
+
+    def attach_action_feature_store(self, store: PI0ActionFeatureStore | None) -> None:
+        self._action_feature_store = store
 
     def set_episode_offsets(self, episode_from_index: dict[int, int] | None) -> None:
         self._episode_from_index = episode_from_index
@@ -130,6 +142,14 @@ class AFTDiffusionModel(DiffusionModel):
             and not self._feature_store.is_empty
         )
 
+    def _action_aft_active(self) -> bool:
+        return (
+            self.config.action_aft_enable
+            and self.action_aft_prior is not None
+            and self._action_feature_store is not None
+            and not self._action_feature_store.is_empty
+        )
+
     def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
         # Reset the capture buffer right before the encoders run, then defer to the
         # unmodified base implementation (whose behavior is preserved exactly).
@@ -156,48 +176,148 @@ class AFTDiffusionModel(DiffusionModel):
             return cur.reshape(batch_size, -1)
         return cur.mean(dim=1)
 
-    # ---- loss ---------------------------------------------------------------
-    def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
-        base_loss = super().compute_loss(batch)
-        self.aft_metrics = None
-        if not self._aft_active():
-            return base_loss
+    def _action_aft_hook(self, _module, _inputs, output):  # noqa: ANN001
+        if torch.is_tensor(output):
+            self._action_aft_captured = output
+        elif isinstance(output, (tuple, list)) and output and torch.is_tensor(output[0]):
+            self._action_aft_captured = output[0]
 
-        batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
-        down = self._assemble_aft_vision_feat(batch_size, n_obs_steps)
-        ep_ids, fr_ids = self._batch_episode_frame(batch)
-        if down is None or ep_ids is None or fr_ids is None:
-            return base_loss
+    def _compute_action_aft_loss(
+        self,
+        batch: dict[str, Tensor],
+        ep_ids: Tensor | None,
+        fr_ids: Tensor | None,
+    ) -> tuple[Tensor | None, dict[str, float | int | str]]:
+        metrics: dict[str, float | int | str] = {
+            "aft_action_matched": 0,
+            "aft_action_timestep": int(self.config.action_aft_timestep),
+            "aft_action_store_mode": self.config.action_aft_store_mode,
+        }
+        if not self._action_aft_active() or ep_ids is None or fr_ids is None:
+            return None, metrics
+        if self.config.action_aft_timestep >= self.noise_scheduler.config.num_train_timesteps:
+            logging.warning(
+                "Action AFT: timestep %d is outside scheduler range [0, %d); skipping.",
+                self.config.action_aft_timestep,
+                self.noise_scheduler.config.num_train_timesteps,
+            )
+            return None, metrics
 
-        pre, mask = self._feature_store.lookup(ep_ids, fr_ids)
+        pre, mask = self._action_feature_store.lookup(ep_ids, fr_ids)
         n_matched = int(mask.sum().item())
-        if n_matched < 2:  # the kernel (Gram) match needs at least 2 matched samples
-            self.aft_metrics = {"aft_loss": 0.0, "aft_matched": n_matched, "aft_base_loss": base_loss.detach().item()}
-            return base_loss
+        metrics["aft_action_matched"] = n_matched
+        if n_matched < 2:
+            metrics["aft_action_loss"] = 0.0
+            return None, metrics
+
+        global_cond = self._prepare_global_conditioning(batch)
+        trajectory = batch[ACTION]
+        eps = torch.randn(trajectory.shape, device=trajectory.device)
+        timesteps = torch.full(
+            (trajectory.shape[0],),
+            int(self.config.action_aft_timestep),
+            dtype=torch.long,
+            device=trajectory.device,
+        )
+        noisy_trajectory = self.noise_scheduler.add_noise(trajectory, eps, timesteps)
+
+        if len(getattr(self.unet, "down_modules", [])) <= 2:
+            logging.warning("Action AFT: U-Net has no down_modules[2]; skipping.")
+            return None, metrics
+        self._action_aft_captured = None
+        handle = self.unet.down_modules[2][1].register_forward_hook(self._action_aft_hook)
+        try:
+            _ = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+        finally:
+            handle.remove()
+
+        down = self._action_aft_captured
+        self._action_aft_captured = None
+        if down is None:
+            logging.warning("Action AFT: failed to capture U-Net down2 feature; skipping.")
+            return None, metrics
+        if down.dim() != 3:
+            logging.warning("Action AFT: expected down2 shape (B,C,T), got %s; skipping.", tuple(down.shape))
+            return None, metrics
+        down = down.mean(dim=-1)
 
         device, dtype = down.device, down.dtype
         mask = mask.to(device)
         pre = pre.to(device=device, dtype=dtype)
         down_m = down[mask]
         pre_m = pre[mask]
-
-        if pre_m.shape[1] != self.aft_prior.num_features:
+        if pre_m.shape[1] != self.action_aft_prior.num_features:
             logging.warning(
-                "AFT: pre-trained feature dim %d != prior dim %d; skipping AFT term this step. "
-                "Set `aft_pretrained_dim` to match the feature store.",
+                "Action AFT: pre-trained feature dim %d != prior dim %d; skipping. "
+                "Set `action_aft_pretrained_dim` to match the action feature store.",
                 pre_m.shape[1],
-                self.aft_prior.num_features,
+                self.action_aft_prior.num_features,
             )
+            return None, metrics
+
+        action_loss = self.action_aft_prior.loss(down_m, pre_m, self.config.action_aft_beta)
+        metrics.update(
+            {
+                "aft_action_kernel_rmse": self.action_aft_prior.metrics.get("aft_kernel_rmse", 0.0),
+                "aft_action_scales_mean": self.action_aft_prior.metrics.get("aft_scales_mean", 0.0),
+                "aft_action_scales_std": self.action_aft_prior.metrics.get("aft_scales_std", 0.0),
+                "aft_action_loss": action_loss.detach().item(),
+            }
+        )
+        return action_loss, metrics
+
+    # ---- loss ---------------------------------------------------------------
+    def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
+        base_loss = super().compute_loss(batch)
+        vision_active = self._aft_active()
+        action_active = self._action_aft_active()
+        if not vision_active and not action_active:
+            self.aft_metrics = None
             return base_loss
 
-        aft_loss = self.aft_prior.loss(down_m, pre_m, self.config.aft_beta)
-        self.aft_metrics = {
-            **self.aft_prior.metrics,
-            "aft_loss": aft_loss.detach().item(),
-            "aft_matched": n_matched,
-            "aft_base_loss": base_loss.detach().item(),
-        }
-        return base_loss + aft_loss
+        total_loss = base_loss
+        self.aft_metrics = {"aft_base_loss": base_loss.detach().item()}
+        batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
+        ep_ids, fr_ids = self._batch_episode_frame(batch)
+
+        if vision_active:
+            down = self._assemble_aft_vision_feat(batch_size, n_obs_steps)
+            if down is not None and ep_ids is not None and fr_ids is not None:
+                pre, mask = self._feature_store.lookup(ep_ids, fr_ids)
+                n_matched = int(mask.sum().item())
+                self.aft_metrics["aft_matched"] = n_matched
+                if n_matched >= 2:  # the kernel (Gram) match needs at least 2 matched samples
+                    device, dtype = down.device, down.dtype
+                    mask = mask.to(device)
+                    pre = pre.to(device=device, dtype=dtype)
+                    down_m = down[mask]
+                    pre_m = pre[mask]
+
+                    if pre_m.shape[1] != self.aft_prior.num_features:
+                        logging.warning(
+                            "AFT: pre-trained feature dim %d != prior dim %d; skipping AFT term this step. "
+                            "Set `aft_pretrained_dim` to match the feature store.",
+                            pre_m.shape[1],
+                            self.aft_prior.num_features,
+                        )
+                    else:
+                        aft_loss = self.aft_prior.loss(down_m, pre_m, self.config.aft_beta)
+                        total_loss = total_loss + aft_loss
+                        self.aft_metrics.update(
+                            {
+                                **self.aft_prior.metrics,
+                                "aft_loss": aft_loss.detach().item(),
+                            }
+                        )
+                else:
+                    self.aft_metrics["aft_loss"] = 0.0
+
+        action_loss, action_metrics = self._compute_action_aft_loss(batch, ep_ids, fr_ids)
+        self.aft_metrics.update(action_metrics)
+        if action_loss is not None:
+            total_loss = total_loss + action_loss
+        self.aft_metrics["aft_total_loss"] = total_loss.detach().item()
+        return total_loss
 
 
 class AFTDiffusionPolicy(DiffusionPolicy):
@@ -241,6 +361,29 @@ class AFTDiffusionPolicy(DiffusionPolicy):
             )
         self.diffusion.attach_feature_store(store)
 
+        action_store: PI0ActionFeatureStore | None = None
+        if config.action_aft_enable and config.action_aft_feature_dir:
+            action_store = PI0ActionFeatureStore(
+                feature_dir=config.action_aft_feature_dir,
+                layer=config.action_aft_layer,
+                timestep=config.action_aft_timestep,
+                pool=config.action_aft_pool,
+                store_mode=config.action_aft_store_mode,
+            )
+            if not action_store.is_empty and action_store.feature_dim != config.action_aft_pretrained_dim:
+                logging.warning(
+                    "Action AFT: feature store dim %d != action_aft_pretrained_dim %d. The action AFT "
+                    "term will be skipped until these match. Set --policy.action_aft_pretrained_dim=%d.",
+                    action_store.feature_dim,
+                    config.action_aft_pretrained_dim,
+                    action_store.feature_dim,
+                )
+        elif config.action_aft_enable:
+            logging.warning(
+                "Action AFT enabled but `action_aft_feature_dir` is not set; action AFT will be inactive."
+            )
+        self.diffusion.attach_action_feature_store(action_store)
+
         # Episode start offsets (episode_index -> global dataset start index) let the
         # model reconstruct frame_index from the batch's `index` after the preprocessor
         # drops `frame_index`. Derived from dataset metadata passed by `make_policy`.
@@ -268,14 +411,23 @@ class AFTDiffusionPolicy(DiffusionPolicy):
     def get_optim_params(self) -> dict:
         """Include the AFT prior's adaptive scales, optionally at a separate LR."""
         prior = getattr(self.diffusion, "aft_prior", None)
-        if prior is None or not self.config.aft_enable or self.config.aft_prior_lr is None:
+        action_prior = getattr(self.diffusion, "action_aft_prior", None)
+        separate_groups: list[tuple[nn.Module, float]] = []
+        if prior is not None and self.config.aft_enable and self.config.aft_prior_lr is not None:
+            separate_groups.append((prior, self.config.aft_prior_lr))
+        if (
+            action_prior is not None
+            and self.config.action_aft_enable
+            and self.config.action_aft_prior_lr is not None
+        ):
+            separate_groups.append((action_prior, self.config.action_aft_prior_lr))
+        if not separate_groups:
             return self.diffusion.parameters()
-        prior_param_ids = {id(p) for p in prior.parameters()}
-        model_params = [p for p in self.diffusion.parameters() if id(p) not in prior_param_ids]
-        return [
-            {"params": model_params},
-            {"params": list(prior.parameters()), "lr": self.config.aft_prior_lr},
-        ]
+        separate_param_ids = {id(p) for module, _lr in separate_groups for p in module.parameters()}
+        model_params = [p for p in self.diffusion.parameters() if id(p) not in separate_param_ids]
+        param_groups = [{"params": model_params}]
+        param_groups.extend({"params": list(module.parameters()), "lr": lr} for module, lr in separate_groups)
+        return param_groups
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict | None]:
         """Run the base diffusion training step plus the AFT regularizer.

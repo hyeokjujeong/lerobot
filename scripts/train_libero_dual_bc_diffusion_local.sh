@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # FULL local training: Diffusion Policy + TEACHER-FEATURE BC auxiliary loss
-# (dual_bc_diffusion) on LIBERO-10 task-0, using the pi0_base extracted features.
+# (dual_bc_diffusion) on LIBERO-10 task-0, using pre-extracted teacher features.
 #
 # This is the "two naive BC losses" variant (NO AFT kernel term, NO divergence
 # term): the shared U-Net is trained on the same noisy actions from (a) the
@@ -27,7 +27,15 @@ set -euo pipefail
 #   BATCH_SIZE, STEPS, WANDB, EPISODES, VAL_EPISODES, EVAL, EVAL_ON_SAVE, RUN_NAME,
 #   EVAL_N_EPISODES, EVAL_BATCH (eval parallel envs, default 1), EVAL_ASYNC (default false),
 #   WANDB_ENTITY (default vla_ft), WANDB_PROJECT (default libero_task0),
-#   TBC_FEATURE_DIR (default extracted_feature/libero10_task0_pi0base).
+#   TBC_FEATURE_DIR, TBC_FEATURE_KEY, TBC_PRETRAINED_DIM, TBC_CAMERA_INDICES.
+#
+# Cosmos3 feature choices from /PublicSSD/ft_vla/outputs/cosmos3_features/libero:
+#   R-ViT:
+#     TBC_FEATURE_KEY=features.vision_tower
+#     TBC_PRETRAINED_DIM=4096
+#   G-V-KV0:
+#     TBC_FEATURE_KEY=features.cosmos3_g_v_kv0
+#     TBC_PRETRAINED_DIM=2048
 #
 # Ablation: TBC_ENABLE=false -> plain-DP baseline (teacher term off, same code path).
 
@@ -44,7 +52,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TBC_FEATURE_DIR="${TBC_FEATURE_DIR:-${REPO_ROOT}/extracted_feature/libero10_task0_pi0base}"
+TBC_FEATURE_DIR="${TBC_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/cosmos3_features/libero}"
+TBC_FEATURE_KEY="${TBC_FEATURE_KEY:-features.vision_tower}"
+TBC_PRETRAINED_DIM="${TBC_PRETRAINED_DIM:-4096}"
+TBC_CAMERA_INDICES="${TBC_CAMERA_INDICES:-[0,1]}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${RUN_NAME}}"
 TBC_LAMBDA="${TBC_LAMBDA:-1.0}"
 TBC_ENABLE="${TBC_ENABLE:-true}"          # false => plain-DP baseline
@@ -108,6 +119,7 @@ WANDB_ARGS=()
 echo "Run name (wandb + output dir): ${RUN_NAME}"
 echo "Output dir: ${OUTPUT_DIR}"
 echo "Teacher-BC: enable=${TBC_ENABLE} lambda=${TBC_LAMBDA} feature_dir=${TBC_FEATURE_DIR}"
+echo "Teacher feature: key=${TBC_FEATURE_KEY} dim=${TBC_PRETRAINED_DIM} camera_indices=${TBC_CAMERA_INDICES}"
 [[ "${WANDB}" == "true" ]] && echo "WandB: entity=${WANDB_ENTITY} project=${WANDB_PROJECT}"
 
 python -m lerobot.scripts.lerobot_train \
@@ -136,11 +148,12 @@ python -m lerobot.scripts.lerobot_train \
   --policy.use_film_scale_modulation=true \
   --policy.tbc_enable="${TBC_ENABLE}" \
   --policy.tbc_feature_dir="${TBC_FEATURE_DIR}" \
+  --policy.tbc_feature_key="${TBC_FEATURE_KEY}" \
   --policy.tbc_lambda="${TBC_LAMBDA}" \
-  --policy.tbc_pretrained_dim=2304 \
+  --policy.tbc_pretrained_dim="${TBC_PRETRAINED_DIM}" \
   --policy.tbc_token_pool=mean \
   --policy.tbc_camera_reduce=concat \
-  --policy.tbc_camera_indices='[0,1]' \
+  --policy.tbc_camera_indices="${TBC_CAMERA_INDICES}" \
   --policy.tbc_obs_step=-1 \
   --policy.tbc_proj_hidden="${TBC_PROJ_HIDDEN}" \
   --policy.tbc_proj_lr="${TBC_PROJ_LR}" \

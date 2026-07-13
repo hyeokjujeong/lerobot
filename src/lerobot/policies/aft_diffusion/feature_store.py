@@ -171,27 +171,32 @@ def _pool_tokens(per_frame: torch.Tensor, token_pool: str, camera_indices: tuple
 def _pool_cosmos3_g_v_kv0(per_frame: torch.Tensor, token_pool: str) -> torch.Tensor:
     """Pool Cosmos3 generator layer-0 visual K/V into a compact per-frame vector.
 
-    Expected per-frame layout is ``(kv=2, visual_tokens, kv_heads, head_dim)``.
-    The first G-V-KV0 experiment uses the same token-pooling idea as the R-ViT
-    feature, then preserves K/V and head structure by flattening the remainder:
+    Expected per-frame layout is either ``(kv=2, visual_tokens, kv_heads,
+    head_dim)`` for a single/mosaic camera image or ``(num_cameras, kv=2,
+    visual_tokens, kv_heads, head_dim)`` for separate-camera extraction. We use
+    the same token-pooling idea as the R-ViT feature, then preserve K/V and head
+    structure by flattening the remainder:
 
         (2, 128, 8, 128) -> mean over tokens -> (2, 8, 128) -> 2048
     """
     t = per_frame.float()
-    if t.dim() != 4 or t.shape[0] != 2:
+    if t.dim() == 4 and t.shape[0] == 2:
+        t = t.unsqueeze(0)
+    if t.dim() != 5 or t.shape[1] != 2:
         raise ValueError(
             f"Unexpected Cosmos3 G-V-KV0 feature shape {tuple(per_frame.shape)}; "
-            "expected (2, visual_tokens, kv_heads, head_dim)."
+            "expected (2, visual_tokens, kv_heads, head_dim) or "
+            "(num_cameras, 2, visual_tokens, kv_heads, head_dim)."
         )
     if token_pool == "mean":
-        pooled = t.mean(dim=1)
+        pooled = t.mean(dim=2)
     elif token_pool == "max":
-        pooled = t.max(dim=1).values
+        pooled = t.max(dim=2).values
     elif token_pool == "cls":
-        pooled = t[:, 0]
+        pooled = t[:, :, 0]
     else:
         raise ValueError(f"Unknown token_pool {token_pool!r}; expected 'mean', 'max', or 'cls'.")
-    return pooled.reshape(1, -1)
+    return pooled.reshape(pooled.shape[0], -1)
 
 
 def _pool_pretrained_feature(

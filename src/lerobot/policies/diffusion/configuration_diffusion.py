@@ -31,10 +31,9 @@ class DiffusionConfig(PreTrainedConfig):
     Those are: `input_features` and `output_features`.
 
     Notes on the inputs and outputs:
-        - "observation.state" is required as an input key.
-        - Either:
-            - At least one key starting with "observation.image is required as an input.
-              AND/OR
+        - "observation.state" is optional as an input key.
+        - At least one of:
+            - A key starting with "observation.image" is required as an input.
             - The key "observation.environment_state" is required as input.
         - If there are multiple keys beginning with "observation.image" they are treated as multiple camera
           views. Right now we only support all images having the same shape.

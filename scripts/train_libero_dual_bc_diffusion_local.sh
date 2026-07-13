@@ -52,17 +52,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-TBC_FEATURE_DIR="${TBC_FEATURE_DIR:-/PublicSSD/ft_vla/outputs/cosmos3_features/libero}"
+TBC_FEATURE_DIR="${TBC_FEATURE_DIR:-/PublicHDD/ft_vla/outputs/cosmos3_features/libero}"
 TBC_FEATURE_KEY="${TBC_FEATURE_KEY:-features.vision_tower}"
 TBC_PRETRAINED_DIM="${TBC_PRETRAINED_DIM:-4096}"
 TBC_CAMERA_INDICES="${TBC_CAMERA_INDICES:-[0,1]}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${RUN_NAME}}"
-TBC_LAMBDA="${TBC_LAMBDA:-1.0}"
+TBC_LAMBDA="${TBC_LAMBDA:-0.5}"
 TBC_ENABLE="${TBC_ENABLE:-true}"          # false => plain-DP baseline
 TBC_PROJ_HIDDEN="${TBC_PROJ_HIDDEN:-null}" # null => single Linear; int => 1-hidden MLP
 TBC_PROJ_LR="${TBC_PROJ_LR:-null}"         # null => model LR
 TBC_ADAPTIVE_SCALE="${TBC_ADAPTIVE_SCALE:-false}" # true => AFT-style sigmoid(s) gate before projection
-BATCH_SIZE="${BATCH_SIZE:-16}"
+BATCH_SIZE="${BATCH_SIZE:-64}"
 STEPS="${STEPS:-60000}"
 WANDB="${WANDB:-true}"
 EPISODES="${EPISODES:-[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14]}"
@@ -171,6 +171,7 @@ python -m lerobot.scripts.lerobot_train \
   --scheduler.name=cosine \
   --scheduler.num_warmup_steps=500 \
   --dataset.repo_id=yzembodied/libero_10_image_task_0 \
+  --dataset.root=/PublicHDD/jhri626/datasets/libero_10_image_task_0 \
   --dataset.episodes="${EPISODES}" \
   --dataset.video_backend=pyav \
   --dataset.return_uint8=true \
@@ -178,7 +179,7 @@ python -m lerobot.scripts.lerobot_train \
   --job_name="${RUN_NAME}" \
   --steps="${STEPS}" \
   --batch_size="${BATCH_SIZE}" \
-  --num_workers=4 \
+  --num_workers=8 \
   --prefetch_factor=2 \
   --save_freq=6000 \
   --log_freq=200 \

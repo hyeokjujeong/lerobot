@@ -39,18 +39,43 @@ decoder, and pulls the student encoder toward producing compatible conditioning.
 
 Inference is identical to the stock Diffusion Policy (only the student path runs);
 the projection is unused at eval but is checkpointed for clean reloads.
+
+Auxiliary objectives
+--------------------
+``--policy.tbc_objective`` selects which auxiliary term is added. All arms share the
+feature store, the keyed teacher frame, the sampled noise/timesteps, the masked-MSE
+reduction and ``tbc_lambda``, so a comparison between them isolates the loss alone:
+
+* ``dual_bc``  (default) the second BC pass described above.
+* ``pullback`` the branch disagreement ``||eps(a_t,t,c_S) - eps(a_t,t,c_T)||^2``.
+  ``dual_bc`` descends an **upper bound** on this quantity
+  (``E||D(f_T) - D(f_S)||^2 <= 2 (L_bc(f_S) + L_bc(f_T))`` by the triangle
+  inequality); ``pullback`` descends it directly. The gap between the two is logged
+  as ``tbc_pullback_bound`` so it can be read off a run.
+* ``feature``  naive feature distillation ``||phi_S - P(g)||^2`` — the same adapter
+  ``P`` and the same teacher vector as the two arms above, measured with the identity
+  metric instead of the decoder pullback metric ``M = J_D^T G J_D``.
+* ``kd``       normalized feature KD through a student->teacher head ("x-distill").
+* ``aft``      the AFT kernel (Gram) prior, reusing ``..aft_diffusion.aft_prior``.
+* ``none``     no auxiliary term (plain Diffusion Policy control).
+
+``dual_bc`` is unchanged by the selector: it is covered by a numerical regression test
+(``tests/policies/test_dual_bc_objectives.py``) so runs recorded before the selector
+existed stay comparable to new ones.
 """
 
 from __future__ import annotations
 
 import logging
 
+import einops
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_STATE
+from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
 
+from ..aft_diffusion.aft_prior import VisionKernelPrior
 from ..aft_diffusion.feature_store import PI0VisionFeatureStore
 from ..diffusion.modeling_diffusion import DiffusionModel, DiffusionPolicy
 from .configuration_dual_bc_diffusion import DualBCDiffusionConfig
@@ -73,14 +98,40 @@ class DualBCDiffusionModel(DiffusionModel):
         # dimension-preserving). NOT the dimension match — applied *before* the
         # projection. Initialised at 0 -> sigmoid(0)=0.5 (matches AFT).
         self.teacher_scale: nn.Parameter | None = None
-        if config.tbc_enable and config.image_features:
+        # Student -> teacher head, used only by the ``kd`` ("x-distill") objective.
+        self.student_kd_proj: nn.Module | None = None
+        # AFT kernel prior (owns its own dimension-preserving ``sigmoid(s)`` gates),
+        # used only by the ``aft`` objective.
+        self.aft_prior: VisionKernelPrior | None = None
+
+        objective = config.tbc_objective
+        if config.tbc_enable and config.image_features and objective != "none":
             self._vision_block_dim = self._student_vision_block_dim()
-            self.teacher_proj = self._build_projection(
-                in_dim=config.tbc_pretrained_dim,
-                out_dim=self._vision_block_dim,
-                hidden=config.tbc_proj_hidden,
-            )
-            if config.tbc_adaptive_scale:
+            if objective in ("dual_bc", "pullback", "feature"):
+                # teacher -> student adapter, shared by all three so that the arms differ
+                # ONLY in the loss applied on top of the very same projected vector.
+                self.teacher_proj = self._build_projection(
+                    in_dim=config.tbc_pretrained_dim,
+                    out_dim=self._vision_block_dim,
+                    hidden=config.tbc_proj_hidden,
+                )
+            elif objective == "kd":
+                # Classic distillation direction: lift the student into the teacher's
+                # space and match there (the AFT repo's `kd` baseline prior).
+                self.student_kd_proj = self._build_projection(
+                    in_dim=self._vision_block_dim,
+                    out_dim=config.tbc_pretrained_dim,
+                    hidden=config.tbc_kd_proj_hidden,
+                )
+            elif objective == "aft":
+                self.aft_prior = VisionKernelPrior(
+                    num_features=config.tbc_pretrained_dim,
+                    learn_scales=config.tbc_aft_learn_scales,
+                    kernel=config.tbc_aft_kernel,
+                )
+            # AFT's prior already carries its own gates; adding a second one would
+            # double-count the adaptive selection, so it is skipped for that arm.
+            if config.tbc_adaptive_scale and objective != "aft":
                 self.teacher_scale = nn.Parameter(torch.zeros(config.tbc_pretrained_dim))
 
         # Offline PI0 feature store (plain attribute, NOT a submodule / no params).
@@ -138,11 +189,33 @@ class DualBCDiffusionModel(DiffusionModel):
             return ep_flat, idx_flat - offsets
         return None, None
 
+    def _has_adapter(self) -> bool:
+        """Whether the module required by the selected objective was built."""
+        objective = self.config.tbc_objective
+        if objective in ("dual_bc", "pullback", "feature"):
+            return self.teacher_proj is not None
+        if objective == "kd":
+            return self.student_kd_proj is not None
+        if objective == "aft":
+            return self.aft_prior is not None
+        return False
+
+    def adapter_parameters(self) -> list[nn.Parameter]:
+        """Every teacher-side adapter parameter, for the optional separate LR group."""
+        params: list[nn.Parameter] = []
+        for module in (self.teacher_proj, self.student_kd_proj, self.aft_prior):
+            if module is not None:
+                params.extend(module.parameters())
+        if self.teacher_scale is not None:
+            params.append(self.teacher_scale)
+        return params
+
     def _tbc_active(self) -> bool:
         return (
             self.config.tbc_enable
+            and self.config.tbc_objective != "none"
             and bool(self.config.image_features)
-            and self.teacher_proj is not None
+            and self._has_adapter()
             and self._feature_store is not None
             and not self._feature_store.is_empty
         )
@@ -172,6 +245,63 @@ class DualBCDiffusionModel(DiffusionModel):
         num_valid = mask.sum() * loss.shape[-1]
         return (loss * mask).sum() / num_valid.clamp_min(1)
 
+    @staticmethod
+    def _masked_sq_distance(pred: Tensor, target: Tensor, sample_mask: Tensor) -> Tensor:
+        """Mean over matched rows of the squared distance ``||pred - target||^2``.
+
+        The sum runs over the feature dimension (not a per-element mean), so the term is
+        a genuine squared distance: under L2-normalized inputs it equals ``2 (1 - cos)``,
+        and it does not shrink by ``1/D`` when the feature is wide. That keeps the
+        ``feature`` and ``kd`` arms on a sane ``tbc_lambda`` scale despite their very
+        different widths (64 vs 2304 here).
+        """
+        sq = F.mse_loss(pred, target, reduction="none").sum(dim=-1)  # (B,)
+        mask = sample_mask.to(sq.dtype)
+        return (sq * mask).sum() / mask.sum().clamp_min(1)
+
+    def _prepare_global_conditioning_split(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor | None]:
+        """``_prepare_global_conditioning`` that also returns the per-step image features.
+
+        Numerically identical to ``DiffusionModel._prepare_global_conditioning`` — it is
+        duplicated only so the feature-space objectives can read the student's vision
+        block without running the RGB encoder a second time.
+
+        Returns:
+            ``(global_cond (B, global_cond_dim), img_features (B, n_obs_steps, vision_block_dim))``.
+            ``img_features`` is ``None`` when the policy has no image features.
+        """
+        batch_size, n_obs_steps = self._get_batch_size_and_n_obs_steps(batch)
+        global_cond_feats = []
+        if self.config.robot_state_feature:
+            global_cond_feats.append(batch[OBS_STATE])
+
+        img_features: Tensor | None = None
+        if self.config.image_features:
+            if self.config.use_separate_rgb_encoder_per_camera:
+                images_per_camera = einops.rearrange(batch[OBS_IMAGES], "b s n ... -> n (b s) ...")
+                img_features_list = torch.cat(
+                    [
+                        encoder(images)
+                        for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
+                    ]
+                )
+                img_features = einops.rearrange(
+                    img_features_list, "(n b s) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                )
+            else:
+                img_features = self.rgb_encoder(
+                    einops.rearrange(batch[OBS_IMAGES], "b s n ... -> (b s n) ...")
+                )
+                img_features = einops.rearrange(
+                    img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps
+                )
+            global_cond_feats.append(img_features)
+
+        if self.config.env_state_feature:
+            global_cond_feats.append(batch[OBS_ENV_STATE])
+
+        return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1), img_features
+
     def _build_teacher_global_cond(self, batch: dict[str, Tensor], teacher_vision: Tensor) -> Tensor:
         """Build a ``global_cond`` with the same layout as the base, but with the
         vision block replaced by ``teacher_vision`` (B, vision_block_dim).
@@ -186,8 +316,7 @@ class DualBCDiffusionModel(DiffusionModel):
         else:
             if n_obs_steps != 1:
                 raise ValueError(
-                    "tbc_broadcast_obs_steps=False requires n_obs_steps==1; "
-                    f"got n_obs_steps={n_obs_steps}."
+                    f"tbc_broadcast_obs_steps=False requires n_obs_steps==1; got n_obs_steps={n_obs_steps}."
                 )
             tv = teacher_vision.unsqueeze(1)
         feats = [state, tv]
@@ -195,14 +324,112 @@ class DualBCDiffusionModel(DiffusionModel):
             feats.append(batch[OBS_ENV_STATE])
         return torch.cat(feats, dim=-1).flatten(start_dim=1)
 
+    # ---- auxiliary objectives ------------------------------------------------
+    def _aux_two_pass(
+        self,
+        batch: dict[str, Tensor],
+        pre: Tensor,
+        mask: Tensor,
+        trajectory: Tensor,
+        noisy_trajectory: Tensor,
+        timesteps: Tensor,
+        target: Tensor,
+        pred_student: Tensor,
+        extra: dict,
+    ) -> Tensor:
+        """``dual_bc`` and ``pullback``: run the shared U-Net a second time on the
+        teacher-conditioned input, then either clone the action (``dual_bc``) or match
+        the two branches directly (``pullback``).
+
+        With a shared decoder ``D`` and a shared target ``a``, the triangle inequality
+        gives ``E||D(f_T) - D(f_S)||^2 <= 2 (L_bc(f_S) + L_bc(f_T))``: ``dual_bc``
+        descends that upper bound, ``pullback`` descends the left-hand side itself.
+        Both are alignment under the decoder pullback metric ``M = J_D^T G J_D``.
+        """
+        teacher_vision = self.teacher_proj(pre)  # (B, vision_block_dim)
+        global_cond_teacher = self._build_teacher_global_cond(batch, teacher_vision)
+
+        if self.config.tbc_share_noise:
+            noisy_t, ts_t, target_t = noisy_trajectory, timesteps, target
+        else:
+            eps_t = torch.randn(trajectory.shape, device=trajectory.device)
+            ts_t = torch.randint(
+                low=0,
+                high=self.noise_scheduler.config.num_train_timesteps,
+                size=(trajectory.shape[0],),
+                device=trajectory.device,
+            ).long()
+            noisy_t = self.noise_scheduler.add_noise(trajectory, eps_t, ts_t)
+            target_t = eps_t if self.config.prediction_type == "epsilon" else trajectory
+
+        pred_teacher = self.unet(noisy_t, ts_t, global_cond=global_cond_teacher)
+        teacher_bc = self._masked_mse(pred_teacher, target_t, batch, sample_mask=mask)
+        extra["tbc_teacher_loss"] = teacher_bc.detach().item()
+
+        if self.config.tbc_objective == "dual_bc":
+            return teacher_bc
+
+        # pullback: the branch disagreement at the SAME (a_t, t) — config validation
+        # guarantees tbc_share_noise=True here, so the comparison is well defined.
+        branch_student, branch_teacher = pred_student, pred_teacher
+        if self.config.tbc_pullback_detach == "teacher":
+            branch_teacher = branch_teacher.detach()
+        elif self.config.tbc_pullback_detach == "student":
+            branch_student = branch_student.detach()
+        disagreement = self._masked_mse(branch_teacher, branch_student, batch, sample_mask=mask)
+        # The bound the dual-BC arm descends instead, logged so the gap is observable.
+        with torch.no_grad():
+            student_bc = self._masked_mse(pred_student, target, batch, sample_mask=mask)
+            extra["tbc_pullback_bound"] = 2.0 * (student_bc + teacher_bc).item()
+        return disagreement
+
+    def _aux_feature(self, student_vision: Tensor, pre: Tensor, mask: Tensor) -> Tensor:
+        """``feature``: naive feature distillation, ``||phi_S - P(g)||^2``.
+
+        Same adapter ``P`` and same teacher vector as ``dual_bc``/``pullback``; the only
+        difference is that the mismatch is measured with the identity metric instead of
+        the decoder pullback metric. This is the arm that isolates the geometry claim.
+        """
+        return self._masked_sq_distance(student_vision, self.teacher_proj(pre), mask)
+
+    def _aux_kd(self, student_vision: Tensor, pre: Tensor, mask: Tensor, extra: dict) -> Tensor:
+        """``kd`` ("x-distill"): lift the student into the teacher space and match there.
+
+        With ``tbc_kd_normalize=True`` both sides are L2-normalized first, so the term is
+        ``2 * (1 - cos)`` — the usual regression-KD form.
+        """
+        student = self.student_kd_proj(student_vision)  # (B, tbc_pretrained_dim)
+        teacher = pre
+        if self.config.tbc_kd_normalize:
+            student = F.normalize(student, dim=-1)
+            teacher = F.normalize(teacher, dim=-1)
+        with torch.no_grad():
+            cos = F.cosine_similarity(student, teacher, dim=-1)
+            sel = mask.to(cos.dtype)
+            extra["tbc_kd_cos"] = ((cos * sel).sum() / sel.sum().clamp_min(1)).item()
+        return self._masked_sq_distance(student, teacher, mask)
+
+    def _aux_aft(self, student_vision: Tensor, pre: Tensor, mask: Tensor, extra: dict) -> Tensor:
+        """``aft``: the AFT kernel (Gram) prior over the matched rows of the batch.
+
+        AFT compares ``B x B`` kernels, so it needs at least two matched rows and never
+        maps the two feature dimensions onto each other.
+        """
+        sel = mask.bool()
+        rmse = self.aft_prior.kernel_rmse(student_vision[sel], pre[sel])
+        # Re-prefix the prior's own metrics so everything stays under `tbc_*`.
+        extra.update({f"tbc_{k}": v for k, v in self.aft_prior.metrics.items()})
+        return rmse
+
+    # ---- loss ---------------------------------------------------------------
     def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
-        # ----- Student BC loss (stock Diffusion Policy path, shared noise) -----
+        # ----- Student BC loss (stock Diffusion Policy path) -----
         n_obs_steps = batch[OBS_STATE].shape[1]
         horizon = batch[ACTION].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps
 
-        global_cond_student = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
+        global_cond_student, img_features = self._prepare_global_conditioning_split(batch)
 
         trajectory = batch[ACTION]
         eps = torch.randn(trajectory.shape, device=trajectory.device)
@@ -228,7 +455,7 @@ class DualBCDiffusionModel(DiffusionModel):
         if not self._tbc_active():
             return loss_student
 
-        # ----- Teacher BC loss (projected PI0 feature -> shared U-Net) -----
+        # ----- Teacher lookup (shared by every objective) -----
         ep_ids, fr_ids = self._batch_episode_frame(batch)
         if ep_ids is None or fr_ids is None:
             return loss_student
@@ -240,8 +467,15 @@ class DualBCDiffusionModel(DiffusionModel):
             "tbc_matched": n_matched,
             "tbc_lambda": float(self.config.tbc_lambda),
         }
-        if n_matched < 1:
-            self.tbc_metrics = {**base_metrics, "tbc_teacher_loss": 0.0, "tbc_loss": loss_student.detach().item()}
+        # The AFT kernel is a Gram matrix over the batch, so it needs >= 2 matched rows.
+        min_matched = 2 if self.config.tbc_objective == "aft" else 1
+        if n_matched < min_matched:
+            self.tbc_metrics = {
+                **base_metrics,
+                "tbc_aux_loss": 0.0,
+                "tbc_teacher_loss": 0.0,
+                "tbc_loss": loss_student.detach().item(),
+            }
             return loss_student
 
         device, dtype = global_cond_student.device, global_cond_student.dtype
@@ -257,34 +491,44 @@ class DualBCDiffusionModel(DiffusionModel):
             )
             return loss_student
 
-        # Optional AFT-style adaptive gate over teacher dims (dim-preserving), then project.
+        extra: dict = {}
+        # Optional AFT-style adaptive gate over the teacher dims (dimension-preserving).
+        # Not built for the `aft` arm, whose prior owns an equivalent gate already.
         if self.teacher_scale is not None:
             pre = pre * self.teacher_scale.sigmoid()
-            base_metrics["tbc_scale_mean"] = self.teacher_scale.sigmoid().mean().item()
-            base_metrics["tbc_scale_std"] = self.teacher_scale.sigmoid().std().item()
-        teacher_vision = self.teacher_proj(pre)  # (B, vision_block_dim)
-        global_cond_teacher = self._build_teacher_global_cond(batch, teacher_vision)
+            extra["tbc_scale_mean"] = self.teacher_scale.sigmoid().mean().item()
+            extra["tbc_scale_std"] = self.teacher_scale.sigmoid().std().item()
 
-        if self.config.tbc_share_noise:
-            noisy_t, ts_t, target_t = noisy_trajectory, timesteps, target
-        else:
-            eps_t = torch.randn(trajectory.shape, device=trajectory.device)
-            ts_t = torch.randint(
-                low=0,
-                high=self.noise_scheduler.config.num_train_timesteps,
-                size=(trajectory.shape[0],),
-                device=trajectory.device,
-            ).long()
-            noisy_t = self.noise_scheduler.add_noise(trajectory, eps_t, ts_t)
-            target_t = eps_t if self.config.prediction_type == "epsilon" else trajectory
+        # Student vision block at the observation step the teacher feature is keyed to.
+        student_vision = img_features[:, self.config.tbc_obs_step]  # (B, vision_block_dim)
 
-        pred_teacher = self.unet(noisy_t, ts_t, global_cond=global_cond_teacher)
-        loss_teacher = self._masked_mse(pred_teacher, target_t, batch, sample_mask=mask)
+        objective = self.config.tbc_objective
+        if objective in ("dual_bc", "pullback"):
+            aux = self._aux_two_pass(
+                batch,
+                pre,
+                mask,
+                trajectory,
+                noisy_trajectory,
+                timesteps,
+                target,
+                pred_student,
+                extra,
+            )
+        elif objective == "feature":
+            aux = self._aux_feature(student_vision, pre, mask)
+        elif objective == "kd":
+            aux = self._aux_kd(student_vision, pre, mask, extra)
+        elif objective == "aft":
+            aux = self._aux_aft(student_vision, pre, mask, extra)
+        else:  # pragma: no cover - guarded by config validation
+            raise ValueError(f"Unknown tbc_objective {objective!r}")
 
-        total = loss_student + self.config.tbc_lambda * loss_teacher
+        total = loss_student + self.config.tbc_lambda * aux
         self.tbc_metrics = {
             **base_metrics,
-            "tbc_teacher_loss": loss_teacher.detach().item(),
+            **extra,
+            "tbc_aux_loss": aux.detach().item(),
             "tbc_loss": total.detach().item(),
         }
         return total
@@ -310,7 +554,12 @@ class DualBCDiffusionPolicy(DiffusionPolicy):
 
         # Build + attach the offline PI0 feature store (no parameters).
         store: PI0VisionFeatureStore | None = None
-        if config.tbc_enable and config.tbc_feature_dir:
+        if config.tbc_enable and config.tbc_objective == "none":
+            logging.info(
+                "DualBC: tbc_objective='none' -> training as a plain Diffusion Policy "
+                "(control arm; no teacher term, no adapter)."
+            )
+        elif config.tbc_enable and config.tbc_feature_dir:
             store = PI0VisionFeatureStore(
                 feature_dir=config.tbc_feature_dir,
                 feature_key=config.tbc_feature_key,
@@ -329,6 +578,13 @@ class DualBCDiffusionPolicy(DiffusionPolicy):
         elif config.tbc_enable:
             logging.warning(
                 "DualBC enabled but `tbc_feature_dir` is not set; training will run as plain Diffusion Policy."
+            )
+        if store is not None and not store.is_empty:
+            logging.info(
+                "DualBC: objective=%s lambda=%s teacher_dim=%d",
+                config.tbc_objective,
+                config.tbc_lambda,
+                store.feature_dim,
             )
         self.diffusion.attach_feature_store(store)
         self.diffusion.set_episode_offsets(self._build_episode_offsets(kwargs.get("dataset_meta")))
@@ -353,14 +609,16 @@ class DualBCDiffusionPolicy(DiffusionPolicy):
             return None
 
     def get_optim_params(self) -> dict:
-        """Optionally place the teacher adapter (projection + adaptive scale) in a separate LR group."""
-        proj = getattr(self.diffusion, "teacher_proj", None)
-        if proj is None or not self.config.tbc_enable or self.config.tbc_proj_lr is None:
+        """Optionally place the teacher-side adapters in a separate LR group.
+
+        Covers whichever adapter the selected objective built: the teacher->student
+        projection, the KD head, the AFT prior's scales and the optional adaptive gate.
+        """
+        if not self.config.tbc_enable or self.config.tbc_proj_lr is None:
             return self.diffusion.parameters()
-        adapter_params = list(proj.parameters())
-        scale = getattr(self.diffusion, "teacher_scale", None)
-        if scale is not None:
-            adapter_params.append(scale)
+        adapter_params = self.diffusion.adapter_parameters()
+        if not adapter_params:
+            return self.diffusion.parameters()
         adapter_ids = {id(p) for p in adapter_params}
         model_params = [p for p in self.diffusion.parameters() if id(p) not in adapter_ids]
         return [

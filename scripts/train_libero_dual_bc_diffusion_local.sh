@@ -22,12 +22,28 @@ set -euo pipefail
 # --run NAME : wandb run name (= --job_name) AND output subdir. (or RUN_NAME=...)
 # Any other --foo=bar args pass straight through, e.g.:
 #   bash scripts/train_libero_dual_bc_diffusion_local.sh --run dbc_l0.5 --policy.tbc_lambda=0.5
+# --objective NAME : which auxiliary loss to add (or TBC_OBJECTIVE=...). One of
+#   dual_bc  (default)  L_bc(student) + lambda * L_bc(teacher)   -- upper bound on the
+#                       branch disagreement; the original behaviour.
+#   pullback            L_bc(student) + lambda * ||eps(a_t,t,c_S) - eps(a_t,t,c_T)||^2
+#                       -- minimizes that disagreement DIRECTLY (explicit alignment
+#                       under the decoder pullback metric M = J^T G J).
+#   feature             naive feature distillation ||phi_S - P(g)||^2 (identity metric).
+#   kd                  normalized feature KD with a student->teacher head ("x-distill").
+#   aft                 the AFT kernel (Gram) prior.
+#   none                plain Diffusion Policy control.
+# Every arm shares the feature store, the keyed teacher frame, the sampled noise and the
+# loss reduction, so only the auxiliary term differs. NOTE: the terms are NOT on a common
+# scale -- sweep TBC_LAMBDA per objective.
+#
 # Optional env overrides: TBC_LAMBDA, TBC_ENABLE, TBC_PROJ_HIDDEN, TBC_PROJ_LR,
+#   TBC_OBJECTIVE, TBC_PULLBACK_DETACH (none|teacher|student), TBC_KD_PROJ_HIDDEN,
+#   TBC_AFT_KERNEL (linear|rbf),
 #   TBC_ADAPTIVE_SCALE (AFT-style sigmoid(s) gate before projection),
 #   BATCH_SIZE, STEPS, WANDB, EPISODES, VAL_EPISODES, EVAL, EVAL_ON_SAVE, RUN_NAME,
 #   EVAL_N_EPISODES, EVAL_BATCH (eval parallel envs, default 1), EVAL_ASYNC (default false),
 #   WANDB_ENTITY (default vla_ft), WANDB_PROJECT (default libero_task0),
-#   TBC_FEATURE_DIR, TBC_FEATURE_KEY, TBC_PRETRAINED_DIM, TBC_CAMERA_INDICES.
+#   TBC_FEATURE_DIR, TBC_FEATURE_KEY, TBC_PRETRAINED_DIM, TBC_CAMERA_INDICES, DATASET_ROOT.
 #
 # Cosmos3 feature choices from /PublicSSD/ft_vla/outputs/cosmos3_features/libero:
 #   R-ViT:
@@ -48,6 +64,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --run) RUN_NAME="$2"; shift 2 ;;
     --run=*) RUN_NAME="${1#*=}"; shift ;;
+    --objective) TBC_OBJECTIVE="$2"; shift 2 ;;
+    --objective=*) TBC_OBJECTIVE="${1#*=}"; shift ;;
     *) PASSTHROUGH+=("$1"); shift ;;
   esac
 done
@@ -58,6 +76,11 @@ TBC_PRETRAINED_DIM="${TBC_PRETRAINED_DIM:-4096}"
 TBC_CAMERA_INDICES="${TBC_CAMERA_INDICES:-[0,1]}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${RUN_NAME}}"
 TBC_LAMBDA="${TBC_LAMBDA:-0.5}"
+TBC_OBJECTIVE="${TBC_OBJECTIVE:-dual_bc}"
+TBC_PULLBACK_DETACH="${TBC_PULLBACK_DETACH:-none}"
+TBC_KD_PROJ_HIDDEN="${TBC_KD_PROJ_HIDDEN:-null}"
+TBC_AFT_KERNEL="${TBC_AFT_KERNEL:-linear}"
+DATASET_ROOT="${DATASET_ROOT:-/PublicHDD/jhri626/datasets/libero_10_image_task_0}"
 TBC_ENABLE="${TBC_ENABLE:-true}"          # false => plain-DP baseline
 TBC_PROJ_HIDDEN="${TBC_PROJ_HIDDEN:-null}" # null => single Linear; int => 1-hidden MLP
 TBC_PROJ_LR="${TBC_PROJ_LR:-null}"         # null => model LR
@@ -118,7 +141,7 @@ WANDB_ARGS=()
 
 echo "Run name (wandb + output dir): ${RUN_NAME}"
 echo "Output dir: ${OUTPUT_DIR}"
-echo "Teacher-BC: enable=${TBC_ENABLE} lambda=${TBC_LAMBDA} feature_dir=${TBC_FEATURE_DIR}"
+echo "Teacher-BC: enable=${TBC_ENABLE} objective=${TBC_OBJECTIVE} lambda=${TBC_LAMBDA} feature_dir=${TBC_FEATURE_DIR}"
 echo "Teacher feature: key=${TBC_FEATURE_KEY} dim=${TBC_PRETRAINED_DIM} camera_indices=${TBC_CAMERA_INDICES}"
 [[ "${WANDB}" == "true" ]] && echo "WandB: entity=${WANDB_ENTITY} project=${WANDB_PROJECT}"
 
@@ -160,6 +183,10 @@ python -m lerobot.scripts.lerobot_train \
   --policy.tbc_adaptive_scale="${TBC_ADAPTIVE_SCALE}" \
   --policy.tbc_broadcast_obs_steps=true \
   --policy.tbc_share_noise=true \
+  --policy.tbc_objective="${TBC_OBJECTIVE}" \
+  --policy.tbc_pullback_detach="${TBC_PULLBACK_DETACH}" \
+  --policy.tbc_kd_proj_hidden="${TBC_KD_PROJ_HIDDEN}" \
+  --policy.tbc_aft_kernel="${TBC_AFT_KERNEL}" \
   --use_policy_training_preset=true \
   --optimizer.type=adamw \
   --optimizer.lr=1e-4 \
@@ -171,7 +198,7 @@ python -m lerobot.scripts.lerobot_train \
   --scheduler.name=cosine \
   --scheduler.num_warmup_steps=500 \
   --dataset.repo_id=yzembodied/libero_10_image_task_0 \
-  --dataset.root=/PublicHDD/jhri626/datasets/libero_10_image_task_0 \
+  --dataset.root="${DATASET_ROOT}" \
   --dataset.episodes="${EPISODES}" \
   --dataset.video_backend=pyav \
   --dataset.return_uint8=true \

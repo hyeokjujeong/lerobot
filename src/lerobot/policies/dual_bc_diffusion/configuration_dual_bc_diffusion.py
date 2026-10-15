@@ -34,7 +34,7 @@ Policy's per-step *vision conditioning block*, then feed that as an alternative
 ``global_cond`` to the **same** U-Net to obtain a second action-prediction (BC)
 loss. The total loss is the naive sum::
 
-    L = L_bc(student_vision)  +  tbc_lambda * L_bc(teacher_vision)
+    L = L_bc(student_vision) + tbc_lambda * L_bc(teacher_vision)
 
 No divergence/kernel term couples the two losses; the only coupling is the shared
 U-Net (FiLM denoiser), through which PI0's task-relevant visual structure is
@@ -48,6 +48,41 @@ mechanism — a learnable diagonal gate ``sigmoid(s)`` over the teacher dims
 (dimension-preserving) — *before* the projection, so the model can down-weight
 irrelevant teacher dimensions the AFT way and then map what remains into the
 conditioning.
+
+Auxiliary objectives (``tbc_objective``)
+----------------------------------------
+All arms share the **same** feature store, the same keyed teacher frame, the same
+sampled noise/timesteps, the same masked-MSE reduction and the same ``tbc_lambda``
+knob. Only the auxiliary term changes, so arms are directly comparable::
+
+    L = L_bc(student) + tbc_lambda * L_aux
+
+=============  =======================================================  ===========================
+``tbc_objective``  L_aux                                                 feature-space metric
+=============  =======================================================  ===========================
+``dual_bc``    ``L_bc(P(g))``  (second BC pass through the shared U-Net)  implicit pullback (upper bound)
+``pullback``   ``||eps(a_t,t,c_S) - eps(a_t,t,c_T)||^2``                  explicit pullback ``J^T G J``
+``feature``    ``||phi_S - P(g)||^2``                                     isotropic (identity)
+``kd``         ``||norm(Q(phi_S)) - norm(g)||^2``  (student -> teacher)   isotropic in teacher space
+``aft``        ``RMSE(K_S - K_g)``  (AFT kernel prior)                    data-statistics (Gram)
+``none``       ``0``  (plain Diffusion Policy; ablation control)          --
+=============  =======================================================  ===========================
+
+``dual_bc`` vs ``pullback`` is the upper-bound comparison. With the shared decoder
+``D`` and shared target ``a``, the triangle inequality gives::
+
+    E||D(f_T) - D(f_S)||^2  <=  2 * ( L_bc(f_S) + L_bc(f_T) )
+
+so ``dual_bc`` minimizes an **upper bound** on the branch disagreement while
+``pullback`` minimizes that disagreement **directly**. Both align the two
+representations under the decoder pullback metric ``M = J_D^T G J_D``; they differ
+only in whether the bound is tightened explicitly.
+
+.. warning::
+   The auxiliary terms have **different natural scales** (a BC-MSE, a feature-MSE, a
+   cosine-type term and a Gram RMSE are not commensurate). ``tbc_lambda`` must be
+   swept **per objective**; a value tuned for ``dual_bc`` is not meaningful for
+   ``aft`` or ``kd``.
 """
 
 from __future__ import annotations
@@ -56,6 +91,23 @@ from dataclasses import dataclass
 
 from lerobot.configs import PreTrainedConfig
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
+
+#: Auxiliary objectives selectable via ``--policy.tbc_objective=...``.
+#:
+#: ``dual_bc``  second BC pass through the shared U-Net (minimizes an upper bound on
+#:              the branch disagreement) — the original behaviour, the default.
+#: ``pullback`` explicit branch-disagreement matching (minimizes that disagreement
+#:              directly, i.e. alignment under the decoder pullback metric).
+#: ``feature``  naive feature distillation in the student's feature space.
+#: ``kd``       normalized feature KD with a student->teacher head ("x-distill").
+#: ``aft``      the AFT kernel (Gram) prior.
+#: ``none``     no auxiliary term and no adapter — a plain Diffusion Policy control
+#:              reachable from the same CLI as the other arms.
+TBC_OBJECTIVES = ("dual_bc", "pullback", "feature", "kd", "aft", "none")
+
+#: Objectives that run a *second* U-Net forward pass (and therefore cost ~2x the
+#: forward compute of the feature-space arms).
+TBC_TWO_PASS_OBJECTIVES = ("dual_bc", "pullback")
 
 
 @PreTrainedConfig.register_subclass("dual_bc_diffusion")
@@ -102,8 +154,28 @@ class DualBCDiffusionConfig(DiffusionConfig):
         tbc_share_noise: If True, the teacher BC pass reuses the same sampled
             noise / timesteps / noisy trajectory as the student pass (paired
             comparison; recommended). If False, the teacher pass resamples.
-        tbc_proj_lr: Optional separate learning rate for the projection params
-            (separate optimizer group). ``None`` uses the model learning rate.
+        tbc_proj_lr: Optional separate learning rate for the adapter params
+            (projection / KD head / AFT scales — separate optimizer group). ``None``
+            uses the model learning rate.
+        tbc_objective: Which auxiliary loss to add. One of ``"dual_bc"`` (default,
+            the original behaviour), ``"pullback"``, ``"feature"``, ``"kd"``,
+            ``"aft"``, ``"none"``. See the module docstring for the table.
+        tbc_pullback_detach: Only for ``tbc_objective="pullback"``. Which branch of
+            the disagreement term is treated as a constant target:
+            ``"none"`` (default, both branches get gradient — the apples-to-apples
+            setting vs. ``dual_bc``), ``"teacher"`` (teacher branch frozen: align the
+            student to the teacher), ``"student"`` (student branch frozen: align the
+            teacher adapter to the student).
+        tbc_kd_proj_hidden: Only for ``tbc_objective="kd"``. Hidden width of the
+            *student -> teacher* KD head ``Q``. ``None`` => a single
+            ``Linear(vision_block_dim -> tbc_pretrained_dim)``.
+        tbc_kd_normalize: Only for ``tbc_objective="kd"``. L2-normalize both sides
+            before the MSE (so the term is ``2 * (1 - cos)``, the standard
+            regression-KD form). Default True.
+        tbc_aft_kernel: Only for ``tbc_objective="aft"``. ``"linear"`` (cosine Gram)
+            or ``"rbf"``.
+        tbc_aft_learn_scales: Only for ``tbc_objective="aft"``. Whether AFT's
+            per-dimension gates ``sigmoid(s)`` are trainable.
     """
 
     tbc_enable: bool = True
@@ -120,6 +192,13 @@ class DualBCDiffusionConfig(DiffusionConfig):
     tbc_broadcast_obs_steps: bool = True
     tbc_share_noise: bool = True
     tbc_proj_lr: float | None = None
+    # --- auxiliary-objective selector (all arms share everything else) ---
+    tbc_objective: str = "dual_bc"
+    tbc_pullback_detach: str = "none"
+    tbc_kd_proj_hidden: int | None = None
+    tbc_kd_normalize: bool = True
+    tbc_aft_kernel: str = "linear"
+    tbc_aft_learn_scales: bool = True
 
     def __post_init__(self):
         super().__post_init__()
@@ -131,3 +210,21 @@ class DualBCDiffusionConfig(DiffusionConfig):
             raise ValueError(f"`tbc_pretrained_dim` must be a positive int. Got {self.tbc_pretrained_dim}.")
         if self.tbc_lambda < 0:
             raise ValueError(f"`tbc_lambda` must be >= 0. Got {self.tbc_lambda}.")
+        if self.tbc_objective not in TBC_OBJECTIVES:
+            raise ValueError(
+                f"`tbc_objective` must be one of {sorted(TBC_OBJECTIVES)}. Got {self.tbc_objective!r}."
+            )
+        if self.tbc_pullback_detach not in ("none", "student", "teacher"):
+            raise ValueError(
+                "`tbc_pullback_detach` must be 'none', 'student' or 'teacher'. "
+                f"Got {self.tbc_pullback_detach!r}."
+            )
+        if self.tbc_aft_kernel not in ("linear", "rbf"):
+            raise ValueError(f"`tbc_aft_kernel` must be 'linear' or 'rbf'. Got {self.tbc_aft_kernel!r}.")
+        if self.tbc_objective == "pullback" and not self.tbc_share_noise:
+            # ||eps(a_t, t, c_S) - eps(a_t, t, c_T)||^2 is only defined when both
+            # branches see the same noisy trajectory and timestep.
+            raise ValueError(
+                "`tbc_objective='pullback'` requires `tbc_share_noise=True`: the branch "
+                "disagreement is only defined at a shared (noisy_trajectory, timestep)."
+            )
